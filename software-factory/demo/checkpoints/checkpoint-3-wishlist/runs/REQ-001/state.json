@@ -1,0 +1,683 @@
+{
+  "id": "REQ-001",
+  "requirement": "Shoppers can save products to a wishlist: a heart button on product cards and on the product page, and a Wishlist page that lists the saved products.",
+  "status": "released",
+  "stages": {
+    "requirements": "done",
+    "analysis": "done",
+    "design": "done",
+    "build": "done",
+    "qa": "done",
+    "review": "done",
+    "approval": "done",
+    "release": "done"
+  },
+  "started_at": "2026-10-18T00:02:40+00:00",
+  "auth": "subscription",
+  "model": "claude-opus-5-5",
+  "pid": 36004,
+  "cost_usd": 2.5242,
+  "title": "Product Wishlist",
+  "user_stories": [
+    "As a shopper, I want to tap a heart button on a product card in the product list, so that I can save products I like without leaving the list.",
+    "As a shopper, I want a heart button on the product page, so that I can save or unsave a product while looking at its details.",
+    "As a shopper, I want a Wishlist page that lists my saved products, so that I can find them again later in the same browser session.",
+    "As a shopper, I want to remove a product from my wishlist, so that the list only holds products I still care about."
+  ],
+  "acceptance_criteria": [
+    "Given a product that is not in my wishlist, When I click the heart button on its product card in the product list, Then the heart shows as filled (saved) and the product appears on the Wishlist page.",
+    "Given a product that is not in my wishlist, When I click the heart button on its product page, Then the heart shows as filled and the product appears on the Wishlist page.",
+    "Given a product that is in my wishlist, When I click its filled heart on a product card or product page, Then the heart shows as empty and the product no longer appears on the Wishlist page.",
+    "Given I have saved products, When I open the Wishlist page from a link in the site header, Then each saved product is listed with its name, image and price, and links to its product page.",
+    "Given my wishlist is empty, When I open the Wishlist page, Then I see a message saying my wishlist is empty and a link back to the products.",
+    "Given I saved a product, When I reload the page or navigate to another page, Then the product is still saved and its heart is still filled on the product list and product page.",
+    "Given two different browser sessions, When one session saves a product, Then the other session's wishlist does not contain it.",
+    "Given a product is already in my wishlist, When it is saved again (e.g. repeated click or request), Then it appears only once on the Wishlist page."
+  ],
+  "out_of_scope": [
+    "User accounts or sharing a wishlist across devices or browsers.",
+    "Moving wishlist items into the cart (add-to-cart from the Wishlist page).",
+    "Wishlist item count badge in the header.",
+    "Price-drop or back-in-stock notifications for saved products.",
+    "Multiple or named wishlists, and sharing a wishlist via link.",
+    "Sorting or filtering the Wishlist page."
+  ],
+  "impact_analysis": {
+    "summary": "Add a wishlist stored on the server per X-Session-Id, built the same way as the cart: model + Alembic migration, a /api/wishlist router, a WishlistContext on the frontend, heart buttons on ProductCard and ProductDetail, a Wishlist page and a header link. Session scoping, keeping state across reloads and de-duplication all come from the existing cart patterns (session_id header, UniqueConstraint).",
+    "db": "New tables, e.g. wishlists (session_id unique, indexed, created_at) and wishlist_items (wishlist_id FK cascade, product_id FK, UniqueConstraint(wishlist_id, product_id)). Alternatively one table wishlist_items(session_id, product_id) with a unique constraint; the architect decides. Needs a new migration 0002 with down_revision='0001', and the model must be registered in api/models/__init__.py so conftest create_all and Alembic can see it. No seed changes.",
+    "api": "New api/routes/wishlist.py with prefix /api/wishlist (get, add, remove), using Depends(get_db) and Depends(get_session_id). Copy get_or_create_cart and to_cart_out from cart.py. Adding a product twice must be idempotent: no duplicate and no error. Unknown product returns 404, like the cart. Items need product_id, name, image and price_cents. New api/schemas/wishlist.py. Register the router in api/main.py. New api/tests/test_wishlist.py modelled on test_cart.py, including the separate-sessions test and an add-twice test.",
+    "ui": "api.js: add getWishlist/addToWishlist/removeFromWishlist. New WishlistContext.jsx copying CartContext (state, refresh on mount, add/remove, plus an isSaved helper or a set of product ids), wrapped in main.jsx and test/renderPage.jsx. ProductCard.jsx: heart toggle button with aria-pressed and an aria-label. The card is a <Link>, so the click handler must call preventDefault/stopPropagation (or the markup restructured) so it does not navigate. ProductDetail.jsx: heart toggle near Add to cart. New pages/Wishlist.jsx copying Cart.jsx: rows with image, name, price and a Link to /products/:id, plus a remove control. The empty state shows a message and a link to '/'. App.jsx: route /wishlist. Header.jsx: NavLink to /wishlist. styles.css: heart button styles.",
+    "patterns_to_follow": [
+      "api/models/cart.py: Cart/CartItem with session_id unique index and a UniqueConstraint for de-duplication",
+      "api/routes/cart.py: get_or_create_cart, to_cart_out, 404 on unknown product, Depends(get_session_id)",
+      "api/schemas/cart.py: pydantic In/Out models",
+      "db/migrations/versions/0001_initial_schema.py: op.create_table/create_index style; new file 0002_* with revision='0002', down_revision='0001'",
+      "api/tests/test_cart.py: plain test functions using the client fixture; X-Session-Id header override for other sessions",
+      "frontend/src/api.js: all fetches via request(); pages never call fetch",
+      "frontend/src/CartContext.jsx: provider plus a useX hook",
+      "frontend/src/pages/Cart.jsx: empty state and list rows with data-testid and aria-label on buttons",
+      "frontend/src/__tests__/*.test.jsx: vi.mock('../api') automock with mockResolvedValue per test, renderPage helper",
+      "e2e/tests/shop.spec.js: role/testid selectors; each test gets a fresh context, which covers session isolation"
+    ],
+    "risks": [
+      "Existing frontend tests use the vi.mock('../api') automock. If WishlistProvider calls api.getWishlist on mount, the mock returns undefined and .then throws. ProductList, ProductDetail, Cart and Checkout tests must mock getWishlist, or the provider must guard against this, e.g. by wrapping the call in Promise.resolve or catching errors.",
+      "renderPage.jsx must wrap the new provider, or components that call useWishlist will crash in tests.",
+      "Heart button inside the ProductCard <Link>: clicks will navigate unless prevented. Also a button nested in an anchor is invalid HTML; consider restructuring the card.",
+      "Header link text: the e2e test clicks getByRole('link', { name: /Cart/ }). A 'Wishlist' label won't match, but avoid any label containing 'Cart'.",
+      "ProductList test counts data-testid='product-card'. Keep that testid on the card root.",
+      "Repeated clicks or a POST race must not create duplicates. Rely on the DB UniqueConstraint and check for an existing item before inserting.",
+      "Existing local store.db needs the new migration applied (python -m db.reset_db or alembic upgrade head) before the API runs.",
+      "The add endpoint returning 201 on repeated adds versus 200 is a design choice for the architect. Keep it consistent with the cart."
+    ]
+  },
+  "affected_files": [
+    {
+      "path": "api/models/wishlist.py",
+      "change": "new",
+      "tier": "db",
+      "reason": "Wishlist/WishlistItem models per session_id with unique (wishlist, product)"
+    },
+    {
+      "path": "api/models/__init__.py",
+      "change": "modify",
+      "tier": "db",
+      "reason": "Register the new models for Alembic and test create_all"
+    },
+    {
+      "path": "db/migrations/versions/0002_wishlist.py",
+      "change": "new",
+      "tier": "db",
+      "reason": "Create wishlist tables, index and unique constraint; down_revision 0001"
+    },
+    {
+      "path": "api/schemas/wishlist.py",
+      "change": "new",
+      "tier": "api",
+      "reason": "Request/response models for wishlist items"
+    },
+    {
+      "path": "api/routes/wishlist.py",
+      "change": "new",
+      "tier": "api",
+      "reason": "GET/POST/DELETE /api/wishlist scoped by X-Session-Id, idempotent add"
+    },
+    {
+      "path": "api/main.py",
+      "change": "modify",
+      "tier": "api",
+      "reason": "include_router(wishlist.router)"
+    },
+    {
+      "path": "api/tests/test_wishlist.py",
+      "change": "new",
+      "tier": "api",
+      "reason": "Empty list, add, add twice once, remove, 404 unknown, separate sessions"
+    },
+    {
+      "path": "frontend/src/api.js",
+      "change": "modify",
+      "tier": "ui",
+      "reason": "Add wishlist API functions"
+    },
+    {
+      "path": "frontend/src/WishlistContext.jsx",
+      "change": "new",
+      "tier": "ui",
+      "reason": "Shared wishlist state so hearts and the page stay in sync"
+    },
+    {
+      "path": "frontend/src/main.jsx",
+      "change": "modify",
+      "tier": "ui",
+      "reason": "Wrap App in WishlistProvider"
+    },
+    {
+      "path": "frontend/src/App.jsx",
+      "change": "modify",
+      "tier": "ui",
+      "reason": "Add /wishlist route"
+    },
+    {
+      "path": "frontend/src/components/Header.jsx",
+      "change": "modify",
+      "tier": "ui",
+      "reason": "Add Wishlist NavLink"
+    },
+    {
+      "path": "frontend/src/components/ProductCard.jsx",
+      "change": "modify",
+      "tier": "ui",
+      "reason": "Heart toggle button that does not trigger the card link"
+    },
+    {
+      "path": "frontend/src/pages/ProductDetail.jsx",
+      "change": "modify",
+      "tier": "ui",
+      "reason": "Heart toggle on the product page"
+    },
+    {
+      "path": "frontend/src/pages/Wishlist.jsx",
+      "change": "new",
+      "tier": "ui",
+      "reason": "List of saved products with remove, plus empty state with a link to products"
+    },
+    {
+      "path": "frontend/src/styles.css",
+      "change": "modify",
+      "tier": "ui",
+      "reason": "Heart button and wishlist row styles"
+    },
+    {
+      "path": "frontend/src/test/renderPage.jsx",
+      "change": "modify",
+      "tier": "ui",
+      "reason": "Wrap WishlistProvider; add EMPTY_WISHLIST fixture"
+    },
+    {
+      "path": "frontend/src/__tests__/Wishlist.test.jsx",
+      "change": "new",
+      "tier": "ui",
+      "reason": "Wishlist page list, empty state and remove"
+    },
+    {
+      "path": "frontend/src/__tests__/ProductList.test.jsx",
+      "change": "modify",
+      "tier": "ui",
+      "reason": "Mock getWishlist; test heart toggle on card"
+    },
+    {
+      "path": "frontend/src/__tests__/ProductDetail.test.jsx",
+      "change": "modify",
+      "tier": "ui",
+      "reason": "Mock getWishlist; test heart toggle on detail"
+    },
+    {
+      "path": "frontend/src/__tests__/Cart.test.jsx",
+      "change": "modify",
+      "tier": "ui",
+      "reason": "Mock getWishlist so the provider does not break on the automocked API"
+    },
+    {
+      "path": "frontend/src/__tests__/Checkout.test.jsx",
+      "change": "modify",
+      "tier": "ui",
+      "reason": "Mock getWishlist so the provider does not break on the automocked API"
+    },
+    {
+      "path": "e2e/tests/wishlist.spec.js",
+      "change": "new",
+      "tier": "e2e",
+      "reason": "Save from list and detail, header link, persists on reload, unsave, empty state, session isolation"
+    }
+  ],
+  "api_contract": [
+    {
+      "method": "GET",
+      "path": "/api/wishlist",
+      "description": "Return the shopper's wishlist (identified by X-Session-Id). Creates an empty wishlist on first call, like GET /api/cart.",
+      "request": "Header X-Session-Id. No body.",
+      "response": "WishlistOut: {\"items\": [{\"product_id\": int, \"name\": str, \"image\": str, \"price_cents\": int}], \"item_count\": int}. Items ordered by when they were added (WishlistItem.id).",
+      "status_codes": [
+        "200 OK",
+        "400 if X-Session-Id missing/invalid (existing get_session_id behaviour)"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/wishlist",
+      "description": "Save a product to the wishlist. Idempotent: if already saved, nothing changes and the same wishlist is returned (no duplicate, no error).",
+      "request": "Header X-Session-Id. Body WishlistItemAdd: {\"product_id\": int}",
+      "response": "WishlistOut (full updated wishlist)",
+      "status_codes": [
+        "201 Created (also on repeated add, consistent with POST /api/cart)",
+        "404 {\"detail\": \"Product not found\"}",
+        "422 validation error"
+      ]
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/wishlist/{product_id}",
+      "description": "Remove a product from the wishlist.",
+      "request": "Header X-Session-Id. Path product_id: int. No body.",
+      "response": "WishlistOut (full updated wishlist)",
+      "status_codes": [
+        "200 OK",
+        "404 {\"detail\": \"Item not in wishlist\"}"
+      ]
+    }
+  ],
+  "schema_change": {
+    "summary": "Two new tables mirroring carts/cart_items: wishlists (one per session_id) and wishlist_items (one row per saved product, unique per wishlist). No changes to existing tables, no seed changes.",
+    "tables": [
+      {
+        "name": "wishlists",
+        "action": "create",
+        "columns": [
+          {
+            "name": "id",
+            "type": "Integer",
+            "constraints": "primary key"
+          },
+          {
+            "name": "session_id",
+            "type": "String(64)",
+            "constraints": "not null; unique index ix_wishlists_session_id"
+          },
+          {
+            "name": "created_at",
+            "type": "DateTime",
+            "constraints": "not null; model default datetime.now(timezone.utc)"
+          }
+        ]
+      },
+      {
+        "name": "wishlist_items",
+        "action": "create",
+        "columns": [
+          {
+            "name": "id",
+            "type": "Integer",
+            "constraints": "primary key"
+          },
+          {
+            "name": "wishlist_id",
+            "type": "Integer",
+            "constraints": "not null; FK wishlists.id ondelete CASCADE"
+          },
+          {
+            "name": "product_id",
+            "type": "Integer",
+            "constraints": "not null; FK products.id"
+          },
+          {
+            "name": "(table)",
+            "type": "UniqueConstraint",
+            "constraints": "UniqueConstraint(wishlist_id, product_id)"
+          }
+        ]
+      }
+    ],
+    "migration": "db/migrations/versions/0002_wishlist.py: docstring 'wishlist: wishlists, wishlist_items', revision='0002', down_revision='0001', branch_labels=None, depends_on=None. upgrade(): op.create_table('wishlists', id Integer pk, session_id String(64) nullable=False, created_at DateTime nullable=False); op.create_index('ix_wishlists_session_id', 'wishlists', ['session_id'], unique=True); op.create_table('wishlist_items', id Integer pk, wishlist_id Integer ForeignKey('wishlists.id', ondelete='CASCADE') nullable=False, product_id Integer ForeignKey('products.id') nullable=False, sa.UniqueConstraint('wishlist_id', 'product_id')). downgrade(): op.drop_table('wishlist_items'); op.drop_index('ix_wishlists_session_id', table_name='wishlists'); op.drop_table('wishlists')."
+  },
+  "plan": {
+    "db": [
+      "1. Create api/models/wishlist.py copying api/models/cart.py: class Wishlist (__tablename__='wishlists', id, session_id String(64) unique index, created_at, items relationship back_populates='wishlist', cascade='all, delete-orphan', order_by='WishlistItem.id') and class WishlistItem (__tablename__='wishlist_items', __table_args__=(UniqueConstraint('wishlist_id','product_id'),), id, wishlist_id FK wishlists.id ondelete CASCADE, product_id FK products.id, wishlist relationship, product relationship). No quantity column.",
+      "2. Modify api/models/__init__.py: import and export Wishlist, WishlistItem (add to __all__ if present).",
+      "3. Create db/migrations/versions/0002_wishlist.py exactly as in the migration spec.",
+      "4. Apply locally with python -m db.reset_db (or alembic upgrade head)."
+    ],
+    "api": [
+      "1. Create api/schemas/wishlist.py: WishlistItemAdd(product_id: int); WishlistItemOut(product_id: int, name: str, image: str, price_cents: int); WishlistOut(items: list[WishlistItemOut], item_count: int).",
+      "2. Create api/routes/wishlist.py: router = APIRouter(prefix='/api/wishlist', tags=['wishlist']); get_or_create_wishlist(db, session_id) and to_wishlist_out(wishlist) copied from cart.py; GET '' -> WishlistOut; POST '' status_code=201: 404 'Product not found' if db.get(Product) is None, append WishlistItem only if no existing item with that product_id, commit, refresh, return; DELETE '/{product_id}': 404 'Item not in wishlist' if missing, else remove, commit, return.",
+      "3. Modify api/main.py: import wishlist from api.routes and app.include_router(wishlist.router) next to cart.",
+      "4. Create api/tests/test_wishlist.py modelled on test_cart.py: empty wishlist; add returns 201 with name/image/price_cents; add twice -> item_count 1; remove; remove missing -> 404; add unknown product -> 404; separate X-Session-Id sessions do not share items; wishlist does not affect cart."
+    ],
+    "ui": [
+      "1. frontend/src/api.js: add getWishlist = () => request('/wishlist'); addToWishlist = (productId) => request('/wishlist', {method:'POST', body: JSON.stringify({product_id: productId})}); removeFromWishlist = (productId) => request(`/wishlist/${productId}`, {method:'DELETE'}).",
+      "2. Create frontend/src/WishlistContext.jsx copying CartContext: EMPTY_WISHLIST = {items: [], item_count: 0}; refresh uses Promise.resolve().then(() => api.getWishlist()).then(w => setWishlist(w ?? EMPTY_WISHLIST)).catch(() => setWishlist(EMPTY_WISHLIST)) so the automocked api in existing tests never throws; addItem, removeItem, isSaved(productId), toggle(productId) (remove if saved else add). Export WishlistProvider and useWishlist.",
+      "3. frontend/src/main.jsx: wrap App in <WishlistProvider> inside CartProvider. frontend/src/test/renderPage.jsx: wrap Routes in WishlistProvider too; export EMPTY_WISHLIST = { items: [], item_count: 0 }.",
+      "4. Create frontend/src/components/HeartButton.jsx: <button type='button' className='heart-button' aria-pressed={saved} aria-label={saved ? `Remove ${name} from wishlist` : `Save ${name} to wishlist`} data-testid='heart-button'> showing '♥' when saved, '♡' when not; onClick calls e.preventDefault(), e.stopPropagation(), then toggle(productId).",
+      "5. frontend/src/components/ProductCard.jsx: change root to <div className='card product-card' data-testid='product-card'> containing the existing <Link to=/products/:id className='product-card-link'> (image + info) and a sibling <HeartButton> (no button inside the anchor).",
+      "6. frontend/src/pages/ProductDetail.jsx: render <HeartButton> next to the Add to cart button.",
+      "7. Create frontend/src/pages/Wishlist.jsx copying Cart.jsx: <h1>Wishlist</h1>; empty state <p>Your wishlist is empty.</p> with <Link to='/'>Browse products</Link>; otherwise rows data-testid='wishlist-item' with image, a Link to /products/:id with the name, formatPrice(price_cents), and a Remove button aria-label={`Remove ${name} from wishlist`}.",
+      "8. frontend/src/App.jsx: add <Route path='/wishlist' element={<Wishlist />} />. frontend/src/components/Header.jsx: add <NavLink to='/wishlist'>Wishlist</NavLink> (label must not contain 'Cart').",
+      "9. frontend/src/styles.css: .product-card position relative, .product-card-link, .heart-button (absolute top-right on card, inline on detail), .wishlist rows mirroring cart rows.",
+      "10. Tests: new frontend/src/__tests__/Wishlist.test.jsx (list rows with links, empty state with link to '/', remove calls removeFromWishlist); update ProductList.test.jsx and ProductDetail.test.jsx (mock getWishlist with EMPTY_WISHLIST, heart click calls addToWishlist and sets aria-pressed=true, and clicking the card heart does not navigate); add api.getWishlist.mockResolvedValue(EMPTY_WISHLIST) in Cart.test.jsx and Checkout.test.jsx.",
+      "11. Create e2e/tests/wishlist.spec.js: save from list and from detail, open via header 'Wishlist' link, persists after reload, unsave via filled heart and via Remove, empty state message + link, fresh context does not see another session's items, double click results in one row."
+    ]
+  },
+  "branch": "feature/REQ-001-product-wishlist",
+  "worktree": "C:\\repo\\yt-software-factory-demo\\store\\.worktrees\\REQ-001-product-wishlist",
+  "base_migration": "0001",
+  "base_commit": "cf6e180",
+  "baseline_tests": {
+    "api": {
+      "tier": "api",
+      "name": "API (pytest)",
+      "ok": true,
+      "passed": 17,
+      "failed": 0,
+      "total": 17,
+      "seconds": 2.2
+    },
+    "ui": {
+      "tier": "ui",
+      "name": "UI (Vitest)",
+      "ok": true,
+      "passed": 10,
+      "failed": 0,
+      "total": 10,
+      "seconds": 4.7
+    },
+    "e2e": {
+      "tier": "e2e",
+      "name": "E2E (Playwright)",
+      "ok": true,
+      "passed": 4,
+      "failed": 0,
+      "total": 4,
+      "seconds": 10.0
+    }
+  },
+  "db_changes": {
+    "summary": "Added wishlists and wishlist_items tables (mirroring carts/cart_items, no quantity, unique wishlist_id+product_id) via migration 0002 and Wishlist/WishlistItem models. Migration upgrade/downgrade verified; 17 API tests pass.",
+    "migration_file": "db/migrations/versions/0002_wishlist.py",
+    "tables": [
+      "wishlists",
+      "wishlist_items"
+    ],
+    "files": [
+      "db/migrations/versions/0002_wishlist.py",
+      "api/models/wishlist.py",
+      "api/models/__init__.py"
+    ]
+  },
+  "api_changes": {
+    "summary": "Added the wishlist API, following the cart pattern. GET returns the shopper's wishlist and creates an empty one on first call. POST is idempotent: it returns 201 even if the product is already saved, and 404 'Product not found' for an unknown product. DELETE returns 404 'Item not in wishlist' if the product isn't saved. Items are ordered by when they were added. All 27 API tests pass.",
+    "endpoints": [
+      "GET /api/wishlist",
+      "POST /api/wishlist",
+      "DELETE /api/wishlist/{product_id}"
+    ],
+    "files": [
+      "api/schemas/wishlist.py",
+      "api/routes/wishlist.py",
+      "api/main.py",
+      "api/tests/test_wishlist.py"
+    ],
+    "tests_added": [
+      "test_new_wishlist_is_empty",
+      "test_add_item_to_wishlist",
+      "test_adding_same_product_twice_keeps_one_item",
+      "test_items_are_ordered_by_when_added",
+      "test_add_unknown_product_returns_404",
+      "test_add_invalid_body_returns_422",
+      "test_remove_item_from_wishlist",
+      "test_remove_missing_item_returns_404",
+      "test_wishlists_are_separate_per_session",
+      "test_wishlist_does_not_affect_cart"
+    ]
+  },
+  "ui_changes": {
+    "summary": "Added the wishlist UI. Heart buttons on product cards and the product page save or unsave a product, a Wishlist page is linked from the header, and wishlist state is shared through WishlistContext. While a save or unsave is in progress, more clicks on that heart are ignored. All 16 unit tests and 5 e2e tests pass.",
+    "components": [
+      "WishlistProvider/useWishlist (WishlistContext.jsx)",
+      "HeartButton",
+      "ProductCard (now a box with a link and a heart button)",
+      "ProductDetail (heart next to Add to cart)",
+      "Wishlist page",
+      "Header Wishlist link",
+      "App /wishlist route"
+    ],
+    "files": [
+      "frontend/src/api.js",
+      "frontend/src/WishlistContext.jsx",
+      "frontend/src/main.jsx",
+      "frontend/src/App.jsx",
+      "frontend/src/components/Header.jsx",
+      "frontend/src/components/HeartButton.jsx",
+      "frontend/src/components/ProductCard.jsx",
+      "frontend/src/pages/ProductDetail.jsx",
+      "frontend/src/pages/Wishlist.jsx",
+      "frontend/src/styles.css",
+      "frontend/src/test/renderPage.jsx",
+      "frontend/src/__tests__/Wishlist.test.jsx",
+      "frontend/src/__tests__/ProductList.test.jsx",
+      "frontend/src/__tests__/ProductDetail.test.jsx",
+      "frontend/src/__tests__/Cart.test.jsx",
+      "frontend/src/__tests__/Checkout.test.jsx",
+      "e2e/tests/wishlist.spec.js"
+    ],
+    "tests_added": [
+      "Wishlist page: shows a message and a link to the products when the wishlist is empty",
+      "Wishlist page: lists saved products with name, image, price and a link to the product",
+      "Wishlist page: removes a product",
+      "ProductList page: saves a product from its card heart without opening the product",
+      "ProductList page: shows saved products with a filled heart and unsaves them",
+      "ProductDetail page: saves the product to the wishlist",
+      "e2e: a shopper can save products to the wishlist and remove them"
+    ]
+  },
+  "iteration": 1,
+  "qa_history": [
+    {
+      "loop": 1,
+      "failing": [
+        "api"
+      ],
+      "tier": "qa",
+      "diagnosis": "The wishlist routes correctly use the shared get_session_id dependency (api/deps.py:18). That dependency declares Header(default=\"demo\", min_length=1, max_length=64), so FastAPI rejects a 65-char X-Session-Id with 422, and a missing header falls back to \"demo\". Nothing in the app turns this into a 400: there is no exception handler. The contract entry says \"400 if X-Session-Id missing/invalid (existing get_session_id behaviour)\". That parenthetical makes the existing behaviour the rule, and the existing behaviour is 422, so the \"400\" in the contract is wrong. GET /api/cart gives the same 422 today. Making the code return 400 would mean changing the shared dependency and every cart endpoint, which is outside REQ-001. The wishlist API matches the existing behaviour. The acceptance test is what's wrong.",
+      "fix_instructions": "In api/tests/test_acceptance_product_wishlist.py, test_invalid_session_id_returns_400 (line 136): rename it to test_invalid_session_id_returns_422 and assert response.status_code == 422 for X-Session-Id \"x\" * 65. This matches the existing get_session_id validation in api/deps.py, which uses max_length=64 and returns FastAPI's standard 422. Do not add a test expecting a missing header to fail: a missing header defaults to session \"demo\" and returns 200. Do not change api/deps.py."
+    }
+  ],
+  "error": null,
+  "failed_at": "2026-10-18T00:08:49+00:00",
+  "acceptance_tests": {
+    "summary": "Renamed test_invalid_session_id_returns_400 to test_invalid_session_id_returns_422. It now expects 422 for a 65-character X-Session-Id, which matches what get_session_id already does. All 15 acceptance tests pass.",
+    "file": "api/tests/test_acceptance_product_wishlist.py",
+    "tests": [
+      "test_saving_a_product_adds_it_to_the_wishlist",
+      "test_removing_a_saved_product_takes_it_off_the_wishlist",
+      "test_wishlist_lists_each_saved_product_with_name_image_and_price",
+      "test_wishlist_items_are_in_the_order_they_were_saved",
+      "test_new_shopper_has_an_empty_wishlist",
+      "test_removing_the_last_product_leaves_an_empty_wishlist",
+      "test_saved_product_is_still_saved_on_later_requests",
+      "test_one_session_saving_does_not_affect_another_session",
+      "test_one_session_removing_does_not_affect_another_session",
+      "test_saving_a_product_twice_lists_it_only_once",
+      "test_saving_an_unknown_product_returns_404",
+      "test_saving_with_invalid_body_returns_422",
+      "test_removing_a_product_not_in_wishlist_returns_404",
+      "test_removing_twice_returns_404_the_second_time",
+      "test_invalid_session_id_returns_422"
+    ],
+    "findings": [
+      "The contract says an invalid X-Session-Id returns 400, but get_session_id (shared with the cart) returns 422. The test now expects 422, and the contract text should be corrected.",
+      "If X-Session-Id is missing, the session falls back to 'demo' and the request returns 200. There is no test for this, as instructed."
+    ]
+  },
+  "test_results": {
+    "api": {
+      "tier": "api",
+      "name": "API (pytest)",
+      "ok": true,
+      "passed": 42,
+      "failed": 0,
+      "total": 42,
+      "seconds": 2.7
+    },
+    "ui": {
+      "tier": "ui",
+      "name": "UI (Vitest)",
+      "ok": true,
+      "passed": 16,
+      "failed": 0,
+      "total": 16,
+      "seconds": 4.8
+    },
+    "e2e": {
+      "tier": "e2e",
+      "name": "E2E (Playwright)",
+      "ok": true,
+      "passed": 5,
+      "failed": 0,
+      "total": 5,
+      "seconds": 13.8
+    }
+  },
+  "files_changed": [
+    {
+      "path": "api/main.py",
+      "added": 2,
+      "removed": 1
+    },
+    {
+      "path": "api/models/__init__.py",
+      "added": 2,
+      "removed": 1
+    },
+    {
+      "path": "api/models/wishlist.py",
+      "added": 31,
+      "removed": 0
+    },
+    {
+      "path": "api/routes/wishlist.py",
+      "added": 65,
+      "removed": 0
+    },
+    {
+      "path": "api/schemas/wishlist.py",
+      "added": 17,
+      "removed": 0
+    },
+    {
+      "path": "api/tests/test_acceptance_product_wishlist.py",
+      "added": 139,
+      "removed": 0
+    },
+    {
+      "path": "api/tests/test_wishlist.py",
+      "added": 84,
+      "removed": 0
+    },
+    {
+      "path": "db/migrations/versions/0002_wishlist.py",
+      "added": 36,
+      "removed": 0
+    },
+    {
+      "path": "e2e/tests/wishlist.spec.js",
+      "added": 76,
+      "removed": 0
+    },
+    {
+      "path": "frontend/src/App.jsx",
+      "added": 2,
+      "removed": 0
+    },
+    {
+      "path": "frontend/src/WishlistContext.jsx",
+      "added": 50,
+      "removed": 0
+    },
+    {
+      "path": "frontend/src/__tests__/Cart.test.jsx",
+      "added": 6,
+      "removed": 2
+    },
+    {
+      "path": "frontend/src/__tests__/Checkout.test.jsx",
+      "added": 2,
+      "removed": 1
+    },
+    {
+      "path": "frontend/src/__tests__/ProductDetail.test.jsx",
+      "added": 22,
+      "removed": 1
+    },
+    {
+      "path": "frontend/src/__tests__/ProductList.test.jsx",
+      "added": 45,
+      "removed": 1
+    },
+    {
+      "path": "frontend/src/__tests__/Wishlist.test.jsx",
+      "added": 52,
+      "removed": 0
+    },
+    {
+      "path": "frontend/src/api.js",
+      "added": 5,
+      "removed": 0
+    },
+    {
+      "path": "frontend/src/components/Header.jsx",
+      "added": 1,
+      "removed": 0
+    },
+    {
+      "path": "frontend/src/components/HeartButton.jsx",
+      "added": 25,
+      "removed": 0
+    },
+    {
+      "path": "frontend/src/components/ProductCard.jsx",
+      "added": 12,
+      "removed": 8
+    },
+    {
+      "path": "frontend/src/main.jsx",
+      "added": 4,
+      "removed": 1
+    },
+    {
+      "path": "frontend/src/pages/ProductDetail.jsx",
+      "added": 7,
+      "removed": 3
+    },
+    {
+      "path": "frontend/src/pages/Wishlist.jsx",
+      "added": 43,
+      "removed": 0
+    },
+    {
+      "path": "frontend/src/styles.css",
+      "added": 70,
+      "removed": 0
+    },
+    {
+      "path": "frontend/src/test/renderPage.jsx",
+      "added": 10,
+      "removed": 4
+    }
+  ],
+  "migration_sql": "-- Running upgrade 0001 -> 0002\nCREATE TABLE wishlists (\n    id INTEGER NOT NULL, \n    session_id VARCHAR(64) NOT NULL, \n    created_at DATETIME NOT NULL, \n    PRIMARY KEY (id)\n);\nCREATE UNIQUE INDEX ix_wishlists_session_id ON wishlists (session_id);\nCREATE TABLE wishlist_items (\n    id INTEGER NOT NULL, \n    wishlist_id INTEGER NOT NULL, \n    product_id INTEGER NOT NULL, \n    PRIMARY KEY (id), \n    UNIQUE (wishlist_id, product_id), \n    FOREIGN KEY(wishlist_id) REFERENCES wishlists (id) ON DELETE CASCADE, \n    FOREIGN KEY(product_id) REFERENCES products (id)\n);",
+  "review": {
+    "summary": "Clean, focused change that copies the existing cart patterns: get_or_create, to_*_out and the session dependency. All queries go through the SQLAlchemy ORM with no raw SQL. Every query is scoped to X-Session-Id, and tests show one session cannot see or change another's wishlist. The API, api.js and the tests match the contract, and every acceptance criterion is covered by API, Vitest or Playwright tests. I found a few minor robustness and polish points but no blockers.",
+    "security_ok": true,
+    "contract_consistent": true,
+    "findings": [
+      {
+        "severity": "minor",
+        "file": "api/routes/wishlist.py",
+        "finding": "The idempotent add is check-then-insert. If two POSTs for the same product arrive at the same moment, the second hits the UniqueConstraint and returns a 500 instead of 201. Catch IntegrityError, roll back and return the wishlist."
+      },
+      {
+        "severity": "minor",
+        "file": "frontend/src/pages/Wishlist.jsx",
+        "finding": "There is no loading state. The context starts as EMPTY_WISHLIST, so on a direct load of /wishlist a shopper with saved items briefly sees 'Your wishlist is empty.' until the GET returns."
+      },
+      {
+        "severity": "minor",
+        "file": "frontend/src/WishlistContext.jsx",
+        "finding": "No caller outside the provider uses 'refresh', yet the context still exposes it. The Promise.resolve().then(...) wrapper adds nothing over calling api.getWishlist() directly. Errors from toggle and remove are swallowed silently, so the shopper gets no feedback when one fails."
+      },
+      {
+        "severity": "info",
+        "file": "api/tests/test_acceptance_product_wishlist.py",
+        "finding": "The contract lists 400 for a missing or invalid X-Session-Id, but get_session_id actually returns 422, and the test asserts 422. The contract defers to the existing behaviour, so this is fine, but the contract text should be corrected."
+      },
+      {
+        "severity": "info",
+        "file": "frontend/src/components/ProductCard.jsx",
+        "finding": "The card changed from a Link to a div wrapping a Link, so the heart button is no longer nested inside an anchor. This is a sensible fix for valid HTML and accessibility."
+      }
+    ]
+  },
+  "verdict": "approve",
+  "approved_by": "Gopal",
+  "approved_at": "2026-10-18T10:23:48+00:00",
+  "version": "1.1.0",
+  "release_notes": "Corner Shop 1.1.0 (2026-10-18): Product Wishlist (REQ-001)\n\nShoppers can now save products they like. A heart button on each product card and on the product page saves or unsaves a product without leaving the page. A new Wishlist page, linked from the header, lists saved products in the order they were added, and shoppers can remove products from it. The wishlist lasts for the current browser session.\n\nTechnical: new API endpoints GET /api/wishlist, POST /api/wishlist (idempotent; 404 for an unknown product) and DELETE /api/wishlist/{product_id} (404 if the product is not in the wishlist). New tables wishlists and wishlist_items (Alembic migration 0002). Heart buttons ignore extra clicks while a save or unsave is in progress.\n\nTesting: 27 API tests, 16 frontend unit tests and 5 e2e tests pass. Migration upgrade and downgrade were checked.",
+  "highlights": [
+    "Heart button on product cards and the product page saves or unsaves a product",
+    "New Wishlist page linked from the header, with remove",
+    "New API endpoints: GET/POST /api/wishlist and DELETE /api/wishlist/{product_id}",
+    "New wishlists and wishlist_items tables (migration 0002)",
+    "CHANGELOG.md updated with the 1.1.0 entry"
+  ],
+  "release_commit": "d537465",
+  "released_at": "2026-10-18T10:24:31+00:00"
+}

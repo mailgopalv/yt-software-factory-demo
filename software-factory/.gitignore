@@ -1,0 +1,7 @@
+.env
+.venv/
+__pycache__/
+.pytest_cache/
+# Only the top-level run folders; demo/checkpoints/*/runs/ are published snapshots.
+/runs/
+/runs-archive/

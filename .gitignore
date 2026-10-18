@@ -1,0 +1,8 @@
+# The store is its own git repo, unpacked from store.bundle by setup. Publish store.bundle, not store/.
+store/
+
+# Leftovers from running Playwright outside the e2e folder
+test-results/
+
+# Gopal's planning notes for the build (kept private)
+claude-editor-reference.md

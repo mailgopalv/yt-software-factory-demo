@@ -1,0 +1,3 @@
+# LF line endings so the .sh scripts work on Mac; the bundle is binary.
+* text=auto eol=lf
+*.bundle binary

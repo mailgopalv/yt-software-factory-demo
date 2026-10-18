@@ -1,0 +1,559 @@
+{
+  "id": "REQ-002",
+  "requirement": "Shoppers can apply a discount code at checkout. Codes are case-insensitive and take a percentage off the order total, rounded to the nearest cent. Seed three codes: SAVE10 (10% off), WELCOME20 (20% off orders of $50 or more) and SUMMER15 (15% off, expired). Invalid or expired codes, or orders below a code's minimum, show a clear error and leave the total unchanged.",
+  "status": "released",
+  "stages": {
+    "requirements": "done",
+    "analysis": "done",
+    "design": "done",
+    "build": "done",
+    "qa": "done",
+    "review": "done",
+    "approval": "done",
+    "release": "done"
+  },
+  "started_at": "2026-10-18T10:29:59+00:00",
+  "auth": "subscription",
+  "model": "claude-opus-5-5",
+  "pid": 33104,
+  "cost_usd": 2.2778,
+  "title": "Discount Codes",
+  "user_stories": [
+    "As a shopper, I want to enter a discount code on the checkout page, so that I pay less for my order.",
+    "As a shopper, I want to see the discount and the new total before I place my order, so that I know exactly what I will pay.",
+    "As a shopper, I want a clear error when my code cannot be used, so that I understand why my total did not change.",
+    "As a store owner, I want the codes SAVE10, WELCOME20 and SUMMER15 available with their rules, so that I can run promotions."
+  ],
+  "acceptance_criteria": [
+    "Given a cart totalling $30.00, When the shopper applies SAVE10 at checkout, Then the checkout shows a $3.00 discount and a total of $27.00.",
+    "Given a cart with any total, When the shopper applies the code as 'save10' or 'Save10', Then it is accepted the same as SAVE10.",
+    "Given a cart totalling $50.00 or more, When the shopper applies WELCOME20, Then 20% is taken off and the total is shown reduced.",
+    "Given a cart totalling less than $50.00, When the shopper applies WELCOME20, Then an error saying the order is below the code's $50.00 minimum is shown and the total is unchanged.",
+    "Given any cart, When the shopper applies SUMMER15, Then an error saying the code has expired is shown and the total is unchanged.",
+    "Given any cart, When the shopper applies a code that does not exist (e.g. BOGUS), Then an error saying the code is invalid is shown and the total is unchanged.",
+    "Given a cart totalling $19.99, When the shopper applies SAVE10, Then the discount is $2.00 (rounded to the nearest cent) and the total is $17.99.",
+    "Given a valid code has been applied, When the shopper places the order, Then the order confirmation and the stored order total show the discounted total."
+  ],
+  "out_of_scope": [
+    "Admin screens for creating, editing or deleting discount codes",
+    "Applying more than one code to the same order (stacking)",
+    "Fixed-amount discounts, free shipping or product-specific codes",
+    "Per-shopper or total usage limits on codes",
+    "Showing discount codes on the cart page or product pages",
+    "Emailing receipts that show the discount"
+  ],
+  "impact_analysis": {
+    "summary": "Add a discount_codes table that comes seeded with SAVE10 (10%, no minimum), WELCOME20 (20%, $50.00 minimum) and SUMMER15 (expired). Add an API to check a code against the session cart. Let POST /api/orders accept an optional code, check it again on the server and store the discounted total_cents. The Checkout page gets a code input, an Apply button, discount and new-total lines, and an inline error.",
+    "db": "New model api/models/discount.py (DiscountCode: code unique, percent_off, min_subtotal_cents, expires_at nullable), registered in api/models/__init__.py. New migration 0003 (down_revision '0002') creates discount_codes and adds nullable discount_code and discount_cents (default 0) columns to orders. Seed the three codes in db/seed.py with their own empty-table check, separate from the products check, so databases that already have products still get the codes. total_cents keeps meaning 'amount paid', which is the discounted total.",
+    "api": "New router api/routes/discounts.py (e.g. POST /api/discounts/apply), checking the code against to_cart_out(cart).total_cents. Match codes case-insensitively by normalising with upper(). Errors are HTTPException 400 with plain detail strings: invalid code, expired code, and below the $50.00 minimum. Put the check-and-calculate logic in one shared helper that orders.py also calls, so the order total can't be faked from the client. Use whole-cent half-up rounding: 1999*10% = 199.9 rounds to 200. New schema api/schemas/discount.py. OrderCreate gets an optional discount_code; OrderOut gets discount_code, discount_cents and the subtotal if the architect wants it. Register the router in api/main.py.",
+    "ui": "In frontend/src/api.js, add an applyDiscount(code) function and let placeOrder send discount_code. Checkout.jsx gets local state for the code input, the applied discount result and the code error. It shows the subtotal, the discount (for example '-$3.00') and the new total using formatPrice, and keeps the order form's error separate from the code error. It passes the applied code to placeOrder. The confirmation already shows order.total_cents, which will now be the discounted total. Add data-testids (e.g. discount-amount, checkout-total) so e2e tests can select elements. Add styles to styles.css only if needed (an .error class already exists).",
+    "patterns_to_follow": [
+      "Models: SQLAlchemy 2.0 Mapped/mapped_column like api/models/order.py and api/models/wishlist.py; add each new model to api/models/__init__.py __all__",
+      "Migrations: copy the style of db/migrations/versions/0002_wishlist.py (revision '0003', down_revision '0002'; use op.add_column for the orders columns, with batch_alter_table if needed for SQLite)",
+      "Money is always integer cents (price_cents, total_cents); the UI formats it with formatPrice from frontend/src/money.js",
+      "Routes: APIRouter(prefix='/api/...'), Depends(get_db) and Depends(get_session_id), and errors as HTTPException(400, detail='...'), as in api/routes/cart.py",
+      "Reuse get_or_create_cart and to_cart_out from api/routes/cart.py to get the cart subtotal, the same way orders.py does",
+      "Frontend: every fetch goes through request() in frontend/src/api.js; the thrown Error.message is the API's detail string and is shown in <p className=\"error\">",
+      "Tests: pytest client fixture in api/tests/conftest.py (in-memory database that runs seed()); Vitest with vi.mock('../api') and renderPage; Playwright specs in e2e/tests/"
+    ],
+    "risks": [
+      "frontend/src/__tests__/Checkout.test.jsx asserts placeOrder was called with exactly {customer_name, email, address}; it will fail if a discount_code key is always sent. Either send the key only when a code is applied or update the test",
+      "db/seed.py only seeds when the products table is empty. If the codes are seeded inside that same check, existing store.db and e2e.db files won't get them",
+      "Python's round() uses banker's rounding; use integer half-up maths so $19.99 at 10% gives exactly 200 cents",
+      "SUMMER15 must be expired no matter what day the tests run: give it a fixed past expires_at (or an active=false flag), and compare times consistently as either naive or UTC-aware",
+      "The cart can change after the code is applied, so place_order must re-check the code against the current cart (for example, WELCOME20 when the cart has dropped below $50)",
+      "Adding nullable/defaulted columns to orders must not break test_orders.py or existing orders rows; the confirmation keeps using total_cents",
+      "Existing databases need alembic upgrade to 0003; the e2e run gets it through db.reset_db"
+    ]
+  },
+  "affected_files": [
+    {
+      "path": "api/models/discount.py",
+      "change": "new",
+      "tier": "db",
+      "reason": "DiscountCode model (code, percent_off, min_subtotal_cents, expires_at)"
+    },
+    {
+      "path": "api/models/__init__.py",
+      "change": "modify",
+      "tier": "db",
+      "reason": "Register DiscountCode for Alembic and tests"
+    },
+    {
+      "path": "api/models/order.py",
+      "change": "modify",
+      "tier": "db",
+      "reason": "Add discount_code and discount_cents columns"
+    },
+    {
+      "path": "db/migrations/versions/0003_discount_codes.py",
+      "change": "new",
+      "tier": "db",
+      "reason": "Create discount_codes table and add the order discount columns"
+    },
+    {
+      "path": "db/seed.py",
+      "change": "modify",
+      "tier": "db",
+      "reason": "Seed SAVE10, WELCOME20 and an expired SUMMER15, with their own empty-table check"
+    },
+    {
+      "path": "api/schemas/discount.py",
+      "change": "new",
+      "tier": "api",
+      "reason": "Request/response schemas for applying a code (code, discount_cents, total)"
+    },
+    {
+      "path": "api/routes/discounts.py",
+      "change": "new",
+      "tier": "api",
+      "reason": "Apply endpoint plus shared validate-and-calculate helper (case-insensitive, min, expiry, rounding)"
+    },
+    {
+      "path": "api/main.py",
+      "change": "modify",
+      "tier": "api",
+      "reason": "Include discounts router"
+    },
+    {
+      "path": "api/schemas/order.py",
+      "change": "modify",
+      "tier": "api",
+      "reason": "Optional discount_code in OrderCreate; discount fields in OrderOut"
+    },
+    {
+      "path": "api/routes/orders.py",
+      "change": "modify",
+      "tier": "api",
+      "reason": "Re-check the code on the server and store the discounted total_cents"
+    },
+    {
+      "path": "api/tests/test_discounts.py",
+      "change": "new",
+      "tier": "api",
+      "reason": "Unit tests: each code, case-insensitive match, minimum, expired, invalid, rounding"
+    },
+    {
+      "path": "api/tests/test_orders.py",
+      "change": "modify",
+      "tier": "api",
+      "reason": "Tests that an order placed with a code stores the discounted total"
+    },
+    {
+      "path": "frontend/src/api.js",
+      "change": "modify",
+      "tier": "ui",
+      "reason": "Add applyDiscount and let placeOrder send discount_code"
+    },
+    {
+      "path": "frontend/src/pages/Checkout.jsx",
+      "change": "modify",
+      "tier": "ui",
+      "reason": "Code input, Apply button, discount/new-total display, code error"
+    },
+    {
+      "path": "frontend/src/__tests__/Checkout.test.jsx",
+      "change": "modify",
+      "tier": "ui",
+      "reason": "Update placeOrder call assertion; add apply success/error tests"
+    },
+    {
+      "path": "frontend/src/styles.css",
+      "change": "modify",
+      "tier": "ui",
+      "reason": "Small styles for the discount row, only if needed"
+    },
+    {
+      "path": "e2e/tests/discount.spec.js",
+      "change": "new",
+      "tier": "e2e",
+      "reason": "End-to-end: apply SAVE10 at checkout, check the errors, place the order and see the discounted total"
+    }
+  ],
+  "api_contract": [
+    {
+      "method": "POST",
+      "path": "/api/discounts/apply",
+      "description": "Checks a discount code against the current session cart and returns the discount and the new total. It changes nothing. The code is normalised with strip().upper(). Checks run in this order: unknown code, then expired (expires_at is set and is before the current naive UTC time), then minimum (cart total_cents < min_subtotal_cents). Discount = (subtotal_cents * percent_off + 50) // 100, which rounds half up in integer maths. Total = subtotal_cents - discount_cents.",
+      "request": "Header X-Session-Id. Body {\"code\": str (min_length 1, max_length 32)}, e.g. {\"code\": \"save10\"}",
+      "response": "200 {\"code\": \"SAVE10\", \"percent_off\": 10, \"subtotal_cents\": 1999, \"discount_cents\": 200, \"total_cents\": 1799}",
+      "status_codes": [
+        "200 code applied",
+        "400 {\"detail\": \"Cart is empty\"}",
+        "400 {\"detail\": \"Discount code is invalid\"}",
+        "400 {\"detail\": \"Discount code has expired\"}",
+        "400 {\"detail\": \"Order total is below the $50.00 minimum for this code\"} (the amount comes from formatting min_subtotal_cents as $X.XX)",
+        "422 validation error (missing or empty code)"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/orders",
+      "description": "Changed: accepts an optional discount_code. If the code is present and not blank, the server runs the same shared helper against the current cart before any stock change. On error it returns 400 with the same detail, creates no order and leaves the cart and stock unchanged. On success it stores discount_code (normalised), discount_cents, and total_cents = subtotal - discount. A missing, null or blank code behaves exactly as before.",
+      "request": "Header X-Session-Id. Body {\"customer_name\": str, \"email\": str, \"address\": str, \"discount_code\": str | null (optional, max_length 32)}",
+      "response": "201 {\"id\": 1, \"customer_name\": \"...\", \"email\": \"...\", \"address\": \"...\", \"item_count\": 2, \"total_cents\": 2700, \"discount_code\": \"SAVE10\" | null, \"discount_cents\": 300, \"created_at\": \"...\"}",
+      "status_codes": [
+        "201 order placed",
+        "400 {\"detail\": \"Cart is empty\"}",
+        "400 {\"detail\": \"Discount code is invalid\"}",
+        "400 {\"detail\": \"Discount code has expired\"}",
+        "400 {\"detail\": \"Order total is below the $50.00 minimum for this code\"}",
+        "422 validation error"
+      ]
+    }
+  ],
+  "schema_change": {
+    "summary": "Adds a new discount_codes table, seeded with SAVE10 (10%, no minimum), WELCOME20 (20%, 5000-cent minimum) and SUMMER15 (15%, expires_at 2025-08-31 23:59:59, so always expired). Adds discount_code and discount_cents to orders. total_cents still means the amount paid, which is the discounted total.",
+    "tables": [
+      {
+        "name": "discount_codes",
+        "action": "create",
+        "columns": [
+          {
+            "name": "id",
+            "type": "Integer",
+            "constraints": "primary key"
+          },
+          {
+            "name": "code",
+            "type": "String(32)",
+            "constraints": "not null; unique index ix_discount_codes_code; stored in upper case"
+          },
+          {
+            "name": "percent_off",
+            "type": "Integer",
+            "constraints": "not null; CHECK percent_off BETWEEN 1 AND 100 (ck_discount_codes_percent_off)"
+          },
+          {
+            "name": "min_subtotal_cents",
+            "type": "Integer",
+            "constraints": "not null; server_default '0'"
+          },
+          {
+            "name": "expires_at",
+            "type": "DateTime",
+            "constraints": "nullable; naive UTC; null means it never expires"
+          }
+        ]
+      },
+      {
+        "name": "orders",
+        "action": "alter",
+        "columns": [
+          {
+            "name": "discount_code",
+            "type": "String(32)",
+            "constraints": "nullable"
+          },
+          {
+            "name": "discount_cents",
+            "type": "Integer",
+            "constraints": "not null; server_default '0'"
+          }
+        ]
+      }
+    ],
+    "migration": "db/migrations/versions/0003_discount_codes.py: docstring 'discount codes: discount_codes, orders.discount_code/discount_cents', revision '0003', down_revision '0002'. upgrade(): op.create_table('discount_codes', id, code, percent_off, min_subtotal_cents (server_default '0'), expires_at nullable, sa.CheckConstraint('percent_off BETWEEN 1 AND 100', name='ck_discount_codes_percent_off')); op.create_index('ix_discount_codes_code', 'discount_codes', ['code'], unique=True); op.add_column('orders', sa.Column('discount_code', sa.String(32), nullable=True)); op.add_column('orders', sa.Column('discount_cents', sa.Integer(), nullable=False, server_default='0')). downgrade(): use op.batch_alter_table('orders') to drop discount_cents and discount_code, then drop the index and the discount_codes table."
+  },
+  "plan": {
+    "db": [
+      "1. Create api/models/discount.py with class DiscountCode(Base), __tablename__ 'discount_codes': id; code String(32) unique=True, index=True; percent_off Integer; min_subtotal_cents Integer default=0; expires_at Mapped[datetime | None] DateTime nullable. Include the CheckConstraint in __table_args__. Follow the style of api/models/order.py.",
+      "2. Modify api/models/order.py: add discount_code: Mapped[str | None] = mapped_column(String(32), nullable=True) and discount_cents: Mapped[int] = mapped_column(Integer, default=0, server_default='0').",
+      "3. Modify api/models/__init__.py: import DiscountCode and add it to __all__.",
+      "4. Create db/migrations/versions/0003_discount_codes.py as given in the schema_change migration.",
+      "5. Modify db/seed.py: add a DISCOUNT_CODES list: SAVE10 (10, 0, None), WELCOME20 (20, 5000, None), SUMMER15 (15, 0, datetime(2025, 8, 31, 23, 59, 59)). In seed(), restructure so products are added only if the products table is empty, and codes are added only if the discount_codes table is empty, as two independent checks with one commit at the end. Update the __main__ print."
+    ],
+    "api": [
+      "1. Create api/schemas/discount.py with DiscountApply(code: str = Field(min_length=1, max_length=32)) and DiscountOut(code: str, percent_off: int, subtotal_cents: int, discount_cents: int, total_cents: int).",
+      "2. Create api/routes/discounts.py with router = APIRouter(prefix='/api/discounts', tags=['discounts']). Add the shared helper calculate_discount(db, code: str, subtotal_cents: int) -> DiscountOut. It normalises code.strip().upper() and looks it up with select. If there is no match, it raises HTTPException(400, 'Discount code is invalid'). If expires_at is set and expires_at < datetime.now(timezone.utc).replace(tzinfo=None), it raises 'Discount code has expired'. If subtotal_cents < min_subtotal_cents, it raises f'Order total is below the ${min/100:.2f} minimum for this code'. Otherwise discount = (subtotal_cents * percent_off + 50) // 100. Add @router.post('/apply', response_model=DiscountOut). It gets the cart with get_or_create_cart, raises 400 'Cart is empty' if there are no items, then returns calculate_discount(db, body.code, to_cart_out(cart).total_cents).",
+      "3. Modify api/main.py to include the discounts router, following the existing include_router calls.",
+      "4. Modify api/schemas/order.py: OrderCreate gets discount_code: str | None = Field(default=None, max_length=32). OrderOut gets discount_code: str | None and discount_cents: int.",
+      "5. Modify api/routes/orders.py: after the empty-cart check and summary, and before the stock decrement, set discount = None. If body.discount_code and body.discount_code.strip(), set discount = calculate_discount(db, body.discount_code, summary.total_cents). Create the Order with total_cents = discount.total_cents if discount else summary.total_cents, discount_code = discount.code if discount else None, and discount_cents = discount.discount_cents if discount else 0.",
+      "6. Create api/tests/test_discounts.py. Cover: SAVE10 on a $30.00 cart gives 300/2700 (use Ceramic Coffee Mug 1499 + ... or any items summing to 3000 if possible, otherwise assert the formula); 'save10' and ' Save10 ' are accepted; WELCOME20 at >= 5000 gives 20%; WELCOME20 under 5000 gives 400 with the minimum message; SUMMER15 gives 400 'expired'; BOGUS gives 400 'invalid'; an empty cart gives 400; a 1999 subtotal gives 200/1799 (via the helper calculate_discount directly with the db session, or a cart that reaches 1999).",
+      "7. Modify api/tests/test_orders.py. Add tests that an order with discount_code 'save10' returns and stores the discounted total_cents, discount_code 'SAVE10' and discount_cents; that an order with an invalid code returns 400 and the cart is still full; and that an order without a code has discount_cents 0 and discount_code null."
+    ],
+    "ui": [
+      "1. Modify frontend/src/api.js: add export const applyDiscount = (code) => request('/discounts/apply', { method: 'POST', body: JSON.stringify({ code }) }). Leave placeOrder unchanged, because it already sends the object it is given.",
+      "2. Modify frontend/src/pages/Checkout.jsx: import applyDiscount. Add state codeInput (''), discount (null) and codeError (''). Replace the summary paragraph with: <p>{cart.item_count} item(s), subtotal <strong data-testid=\"checkout-subtotal\">{formatPrice(cart.total_cents)}</strong></p>; when discount is set, <p>Discount ({discount.code}) <strong data-testid=\"discount-amount\">-{formatPrice(discount.discount_cents)}</strong></p>; and always <p>Total <strong data-testid=\"checkout-total\">{formatPrice(discount ? discount.total_cents : cart.total_cents)}</strong></p>. Before the order form, add a separate <form className=\"card discount-form\" onSubmit={handleApply}> with <label>Discount code <input name=\"discount_code\" data-testid=\"discount-code-input\" value={codeInput} .../></label>, {codeError && <p className=\"error\" data-testid=\"discount-error\">{codeError}</p>} and <button type=\"submit\" className=\"button\" data-testid=\"discount-apply\">Apply</button>. handleApply: preventDefault, clear codeError, then try setDiscount(await applyDiscount(codeInput)); on catch, setDiscount(null) and setCodeError(err.message). handleSubmit calls placeOrder(discount ? { ...form, discount_code: discount.code } : form), so the existing test's exact-args assertion still passes when no code is applied. The confirmation keeps using order.total_cents; add data-testid=\"order-total\" to a <span> wrapping it.",
+      "3. Modify frontend/src/__tests__/Checkout.test.jsx: add applyDiscount to the vi.mock. Add tests: a successful apply shows discount-amount '-$3.00' and checkout-total '$27.00'; a rejected apply shows the error message and checkout-total stays the subtotal; placing an order after applying calls placeOrder with discount_code 'SAVE10'. Keep the existing assertion.",
+      "4. Modify frontend/src/styles.css only if needed: add a small .discount-form rule (display flex, gap, align-items end, margin-bottom) that matches .checkout-form.",
+      "5. Create e2e/tests/discount.spec.js. Add products to the cart, go to checkout and apply SAVE10, then check the discount and total. Apply 'save10' in lower case. Check the errors for BOGUS, SUMMER15 and WELCOME20 under $50, and that checkout-total is unchanged. Place an order with SAVE10 and check that order-total shows the discounted amount."
+    ]
+  },
+  "branch": "feature/REQ-002-discount-codes",
+  "worktree": "C:\\repo\\yt-software-factory-demo\\store\\.worktrees\\REQ-002-discount-codes",
+  "base_migration": "0002",
+  "base_commit": "d537465",
+  "baseline_tests": {
+    "api": {
+      "tier": "api",
+      "name": "API (pytest)",
+      "ok": true,
+      "passed": 42,
+      "failed": 0,
+      "total": 42,
+      "seconds": 2.8
+    },
+    "ui": {
+      "tier": "ui",
+      "name": "UI (Vitest)",
+      "ok": true,
+      "passed": 16,
+      "failed": 0,
+      "total": 16,
+      "seconds": 4.6
+    },
+    "e2e": {
+      "tier": "e2e",
+      "name": "E2E (Playwright)",
+      "ok": true,
+      "passed": 5,
+      "failed": 0,
+      "total": 5,
+      "seconds": 13.8
+    }
+  },
+  "db_changes": {
+    "summary": "Added DiscountCode model and discount_codes table (unique code index, percent_off check), plus orders.discount_code and orders.discount_cents (server_default 0). Seed now adds products and the codes SAVE10, WELCOME20 and SUMMER15 (expired), each only when its own table is empty, with one commit at the end. The migration upgrades and downgrades cleanly on a scratch db and all 42 API tests pass.",
+    "migration_file": "db/migrations/versions/0003_discount_codes.py",
+    "tables": [
+      "discount_codes",
+      "orders"
+    ],
+    "files": [
+      "api/models/discount.py",
+      "api/models/order.py",
+      "api/models/__init__.py",
+      "db/migrations/versions/0003_discount_codes.py",
+      "db/seed.py"
+    ]
+  },
+  "api_changes": {
+    "summary": "Added POST /api/discounts/apply with a shared calculate_discount helper. It checks invalid, then expired, then minimum, and rounds half up. POST /api/orders now takes an optional discount_code, checks it before any stock change, and stores discount_code, discount_cents and the discounted total_cents. All 67 API tests pass. No product combination totals exactly 3000 or 1999 cents, so those amounts are tested through the helper directly.",
+    "endpoints": [
+      "POST /api/discounts/apply",
+      "POST /api/orders (changed: optional discount_code)"
+    ],
+    "files": [
+      "api/schemas/discount.py",
+      "api/routes/discounts.py",
+      "api/main.py",
+      "api/schemas/order.py",
+      "api/routes/orders.py",
+      "api/tests/test_discounts.py",
+      "api/tests/test_orders.py"
+    ],
+    "tests_added": [
+      "test_discounts.py: SAVE10 apply, case-insensitive codes, WELCOME20 over/under minimum, SUMMER15 expired, BOGUS invalid, empty cart, 422 validation, apply changes nothing, helper rounding 3000->2700 and 1999->1799, expiry checked before minimum",
+      "test_orders.py: discounted order stored, invalid code leaves cart/stock/orders unchanged, below-minimum and expired codes return 400, empty cart with code, too-long code 422, missing/null/blank code gives no discount"
+    ]
+  },
+  "ui_changes": {
+    "summary": "Shoppers can now apply a discount code at checkout. The page shows the subtotal, the discount and the reduced total, or the API's error message with the total unchanged. When an order is placed, the applied code is sent with it, and the confirmation shows the discounted total. All 19 unit tests and all 6 end-to-end tests pass. The e2e journey uses a $24.98 cart, because no mix of products adds up to exactly $30.00. It checks BOGUS, SUMMER15, WELCOME20 under the minimum, lower-case save10 (-$2.50, total $22.48) and the discounted order total.",
+    "components": [
+      "Checkout page: discount code form, subtotal/discount/total lines, order-total on confirmation",
+      "api.applyDiscount"
+    ],
+    "files": [
+      "frontend/src/api.js",
+      "frontend/src/pages/Checkout.jsx",
+      "frontend/src/styles.css",
+      "frontend/src/__tests__/Checkout.test.jsx",
+      "e2e/tests/discount.spec.js"
+    ],
+    "tests_added": [
+      "Checkout.test.jsx: applying a code shows -$3.00 and a $27.00 total",
+      "Checkout.test.jsx: a rejected code shows the error and the total is unchanged",
+      "Checkout.test.jsx: placing an order sends discount_code SAVE10 and shows the discounted order total",
+      "e2e discount.spec.js: invalid, expired and below-minimum errors, lower-case save10 applied, order placed with the discounted total"
+    ]
+  },
+  "iteration": 0,
+  "qa_history": [],
+  "acceptance_tests": {
+    "summary": "I wrote 16 acceptance tests for REQ-002 Discount Codes. All 16 pass. They cover the 8 acceptance criteria and the edge cases the contract implies.",
+    "file": "api/tests/test_acceptance_discount_codes.py",
+    "tests": [
+      "test_save10_on_a_30_dollar_cart_gives_3_dollars_off_and_27_dollar_total",
+      "test_code_is_accepted_in_any_letter_case",
+      "test_welcome20_on_a_cart_of_50_dollars_or_more_takes_20_percent_off",
+      "test_welcome20_on_a_cart_of_exactly_50_dollars_is_accepted",
+      "test_welcome20_below_50_dollars_shows_minimum_error_and_total_unchanged",
+      "test_summer15_shows_expired_error_and_total_unchanged",
+      "test_unknown_code_shows_invalid_error_and_total_unchanged",
+      "test_save10_on_a_19_99_cart_rounds_discount_to_2_dollars_and_total_17_99",
+      "test_placed_order_with_valid_code_shows_and_stores_discounted_total",
+      "test_order_without_code_is_placed_at_full_price",
+      "test_order_with_bad_code_is_rejected_and_cart_and_stock_unchanged",
+      "test_order_below_code_minimum_is_rejected",
+      "test_applying_a_code_changes_nothing",
+      "test_applying_a_code_to_an_empty_cart_returns_400",
+      "test_applying_uses_only_the_current_shoppers_cart",
+      "test_missing_empty_or_too_long_code_returns_422"
+    ],
+    "findings": [
+      "No defects found. All 16 tests pass.",
+      "Every seed price ends in .99, so no mix of seed products adds up to $30.00, $19.99 or exactly $50.00. To build those carts, the tests change the Mug's price in the test database through the db fixture.",
+      "There is no GET endpoint for orders, so the test reads the stored order total directly from the database."
+    ]
+  },
+  "test_results": {
+    "api": {
+      "tier": "api",
+      "name": "API (pytest)",
+      "ok": true,
+      "passed": 83,
+      "failed": 0,
+      "total": 83,
+      "seconds": 4.1
+    },
+    "ui": {
+      "tier": "ui",
+      "name": "UI (Vitest)",
+      "ok": true,
+      "passed": 19,
+      "failed": 0,
+      "total": 19,
+      "seconds": 5.9
+    },
+    "e2e": {
+      "tier": "e2e",
+      "name": "E2E (Playwright)",
+      "ok": true,
+      "passed": 6,
+      "failed": 0,
+      "total": 6,
+      "seconds": 15.3
+    }
+  },
+  "files_changed": [
+    {
+      "path": "api/main.py",
+      "added": 2,
+      "removed": 1
+    },
+    {
+      "path": "api/models/__init__.py",
+      "added": 2,
+      "removed": 1
+    },
+    {
+      "path": "api/models/discount.py",
+      "added": 17,
+      "removed": 0
+    },
+    {
+      "path": "api/models/order.py",
+      "added": 2,
+      "removed": 0
+    },
+    {
+      "path": "api/routes/discounts.py",
+      "added": 47,
+      "removed": 0
+    },
+    {
+      "path": "api/routes/orders.py",
+      "added": 8,
+      "removed": 1
+    },
+    {
+      "path": "api/schemas/discount.py",
+      "added": 13,
+      "removed": 0
+    },
+    {
+      "path": "api/schemas/order.py",
+      "added": 3,
+      "removed": 0
+    },
+    {
+      "path": "api/tests/test_acceptance_discount_codes.py",
+      "added": 191,
+      "removed": 0
+    },
+    {
+      "path": "api/tests/test_discounts.py",
+      "added": 110,
+      "removed": 0
+    },
+    {
+      "path": "api/tests/test_orders.py",
+      "added": 81,
+      "removed": 0
+    },
+    {
+      "path": "db/migrations/versions/0003_discount_codes.py",
+      "added": 36,
+      "removed": 0
+    },
+    {
+      "path": "db/seed.py",
+      "added": 16,
+      "removed": 6
+    },
+    {
+      "path": "e2e/tests/discount.spec.js",
+      "added": 52,
+      "removed": 0
+    },
+    {
+      "path": "frontend/src/__tests__/Checkout.test.jsx",
+      "added": 65,
+      "removed": 0
+    },
+    {
+      "path": "frontend/src/api.js",
+      "added": 3,
+      "removed": 0
+    },
+    {
+      "path": "frontend/src/pages/Checkout.jsx",
+      "added": 52,
+      "removed": 4
+    },
+    {
+      "path": "frontend/src/styles.css",
+      "added": 30,
+      "removed": 0
+    }
+  ],
+  "migration_sql": "-- Running upgrade 0002 -> 0003\nCREATE TABLE discount_codes (\n    id INTEGER NOT NULL, \n    code VARCHAR(32) NOT NULL, \n    percent_off INTEGER NOT NULL, \n    min_subtotal_cents INTEGER DEFAULT '0' NOT NULL, \n    expires_at DATETIME, \n    PRIMARY KEY (id), \n    CONSTRAINT ck_discount_codes_percent_off CHECK (percent_off BETWEEN 1 AND 100)\n);\nCREATE UNIQUE INDEX ix_discount_codes_code ON discount_codes (code);\nALTER TABLE orders ADD COLUMN discount_code VARCHAR(32);\nALTER TABLE orders ADD COLUMN discount_cents INTEGER DEFAULT '0' NOT NULL;",
+  "review": {
+    "summary": "Clean, focused change. The shared calculate_discount helper does the checks in the contract order (unknown, then expired, then minimum) and uses the contract's integer half-up rounding. All lookups go through the ORM, so there is no SQL injection risk. The cart comes from the X-Session-Id header, so one shopper's session cannot leak into another's. When placing an order, the code is checked before any stock change, so on error no order is created and the cart and stock are untouched. The response shapes, the schema validation (code length 1-32; discount_code optional, max 32) and the error messages all match the contract. Tests cover every acceptance criterion at the API, UI and E2E levels, including rounding ($19.99 -> $2.00), case-insensitive codes, and the stored order total.",
+    "security_ok": true,
+    "contract_consistent": true,
+    "findings": [
+      {
+        "severity": "minor",
+        "file": "frontend/src/pages/Checkout.jsx",
+        "finding": "The applied discount is a one-time preview. If the cart changed after Apply (e.g. in another tab), the shown total could be stale. The server recalculates when the order is placed, so the stored total is always correct; this is display-only."
+      },
+      {
+        "severity": "info",
+        "file": "api/routes/discounts.py",
+        "finding": "calculate_discount is a shared helper kept in a routes module and imported by orders.py. This matches the existing pattern of importing helpers from routes.cart. A service module could be considered later."
+      },
+      {
+        "severity": "info",
+        "file": "db/migrations/versions/0003_discount_codes.py",
+        "finding": "The migration matches the model: unique index on code, percent check constraint, and server_default 0 for discount_cents so existing orders stay valid. Downgrade uses batch_alter_table, which SQLite needs."
+      }
+    ]
+  },
+  "verdict": "approve",
+  "approved_by": "Gopal",
+  "approved_at": "2026-10-18T10:51:00+00:00",
+  "version": "1.2.0",
+  "release_notes": "Corner Shop 1.2.0 (2026-10-18) adds Discount Codes (REQ-002). Shoppers can now enter a discount code at checkout. Codes are not case-sensitive. Before placing the order, shoppers see the subtotal, the discount and the new total. If a code can't be used, they get a clear message saying whether the code is unknown, expired or below its minimum order amount, and the total stays the same. When the order is placed, it saves the code, the discount and the discounted total, and the confirmation page shows the discounted total. Three codes come with the store: SAVE10, WELCOME20 (needs a minimum order amount) and SUMMER15 (expired). For developers: there is a new endpoint, POST /api/discounts/apply. POST /api/orders now accepts an optional discount_code and checks it before any stock changes. A new discount_codes table and two new columns on orders (discount_code, discount_cents) come with a new Alembic migration. All 67 API tests, 19 unit tests and 6 end-to-end tests pass.",
+  "highlights": [
+    "Shoppers can apply a discount code at checkout (not case-sensitive)",
+    "Checkout shows the subtotal, the discount and the new total before the order is placed",
+    "Clear errors for unknown codes, expired codes or orders below the minimum. The total stays the same",
+    "Orders save the code, the discount and the discounted total. The confirmation shows the discounted total",
+    "New codes: SAVE10, WELCOME20 (has a minimum order) and SUMMER15 (expired)",
+    "New endpoint POST /api/discounts/apply. POST /api/orders accepts an optional discount_code"
+  ],
+  "release_commit": "cdef51e",
+  "released_at": "2026-10-18T10:51:26+00:00"
+}

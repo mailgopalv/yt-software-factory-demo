@@ -1,0 +1,2 @@
+# Keep LF line endings everywhere so scripts work on Mac and diffs stay clean.
+* text=auto eol=lf

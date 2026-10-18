@@ -1,0 +1,1143 @@
+diff --git a/api/main.py b/api/main.py
+index 04e95e7..135ff42 100644
+--- a/api/main.py
++++ b/api/main.py
+@@ -3,7 +3,7 @@ from fastapi import FastAPI
+ from fastapi.middleware.cors import CORSMiddleware
+ 
+ from api.database import STORE_DIR
+-from api.routes import cart, orders, products
++from api.routes import cart, orders, products, wishlist
+ 
+ VERSION = (STORE_DIR / "VERSION").read_text().strip()
+ 
+@@ -18,6 +18,7 @@ app.add_middleware(
+ 
+ app.include_router(products.router)
+ app.include_router(cart.router)
++app.include_router(wishlist.router)
+ app.include_router(orders.router)
+ 
+ 
+diff --git a/api/models/__init__.py b/api/models/__init__.py
+index b98c1f4..fbe5eca 100644
+--- a/api/models/__init__.py
++++ b/api/models/__init__.py
+@@ -2,5 +2,6 @@
+ from api.models.cart import Cart, CartItem
+ from api.models.order import Order
+ from api.models.product import Product
++from api.models.wishlist import Wishlist, WishlistItem
+ 
+-__all__ = ["Cart", "CartItem", "Order", "Product"]
++__all__ = ["Cart", "CartItem", "Order", "Product", "Wishlist", "WishlistItem"]
+diff --git a/api/models/wishlist.py b/api/models/wishlist.py
+new file mode 100644
+index 0000000..c47b6dd
+--- /dev/null
++++ b/api/models/wishlist.py
+@@ -0,0 +1,31 @@
++from datetime import datetime, timezone
++
++from sqlalchemy import DateTime, ForeignKey, String, UniqueConstraint
++from sqlalchemy.orm import Mapped, mapped_column, relationship
++
++from api.database import Base
++from api.models.product import Product
++
++
++class Wishlist(Base):
++    __tablename__ = "wishlists"
++
++    id: Mapped[int] = mapped_column(primary_key=True)
++    session_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
++    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
++
++    items: Mapped[list["WishlistItem"]] = relationship(
++        back_populates="wishlist", cascade="all, delete-orphan", order_by="WishlistItem.id"
++    )
++
++
++class WishlistItem(Base):
++    __tablename__ = "wishlist_items"
++    __table_args__ = (UniqueConstraint("wishlist_id", "product_id"),)
++
++    id: Mapped[int] = mapped_column(primary_key=True)
++    wishlist_id: Mapped[int] = mapped_column(ForeignKey("wishlists.id", ondelete="CASCADE"))
++    product_id: Mapped[int] = mapped_column(ForeignKey("products.id"))
++
++    wishlist: Mapped[Wishlist] = relationship(back_populates="items")
++    product: Mapped[Product] = relationship()
+diff --git a/api/routes/wishlist.py b/api/routes/wishlist.py
+new file mode 100644
+index 0000000..c94a7d3
+--- /dev/null
++++ b/api/routes/wishlist.py
+@@ -0,0 +1,65 @@
++from fastapi import APIRouter, Depends, HTTPException
++from sqlalchemy import select
++from sqlalchemy.orm import Session
++
++from api.deps import get_db, get_session_id
++from api.models import Product, Wishlist, WishlistItem
++from api.schemas.wishlist import WishlistItemAdd, WishlistItemOut, WishlistOut
++
++router = APIRouter(prefix="/api/wishlist", tags=["wishlist"])
++
++
++def get_or_create_wishlist(db: Session, session_id: str) -> Wishlist:
++    wishlist = db.scalar(select(Wishlist).where(Wishlist.session_id == session_id))
++    if wishlist is None:
++        wishlist = Wishlist(session_id=session_id)
++        db.add(wishlist)
++        db.commit()
++    return wishlist
++
++
++def to_wishlist_out(wishlist: Wishlist) -> WishlistOut:
++    items = [
++        WishlistItemOut(
++            product_id=item.product_id,
++            name=item.product.name,
++            image=item.product.image,
++            price_cents=item.product.price_cents,
++        )
++        for item in wishlist.items
++    ]
++    return WishlistOut(items=items, item_count=len(items))
++
++
++@router.get("", response_model=WishlistOut)
++def get_wishlist(db: Session = Depends(get_db), session_id: str = Depends(get_session_id)):
++    return to_wishlist_out(get_or_create_wishlist(db, session_id))
++
++
++@router.post("", response_model=WishlistOut, status_code=201)
++def add_to_wishlist(
++    body: WishlistItemAdd, db: Session = Depends(get_db), session_id: str = Depends(get_session_id)
++):
++    product = db.get(Product, body.product_id)
++    if product is None:
++        raise HTTPException(status_code=404, detail="Product not found")
++
++    wishlist = get_or_create_wishlist(db, session_id)
++    if not any(i.product_id == body.product_id for i in wishlist.items):
++        wishlist.items.append(WishlistItem(product_id=product.id))
++        db.commit()
++        db.refresh(wishlist)
++    return to_wishlist_out(wishlist)
++
++
++@router.delete("/{product_id}", response_model=WishlistOut)
++def remove_from_wishlist(
++    product_id: int, db: Session = Depends(get_db), session_id: str = Depends(get_session_id)
++):
++    wishlist = get_or_create_wishlist(db, session_id)
++    item = next((i for i in wishlist.items if i.product_id == product_id), None)
++    if item is None:
++        raise HTTPException(status_code=404, detail="Item not in wishlist")
++    wishlist.items.remove(item)
++    db.commit()
++    return to_wishlist_out(wishlist)
+diff --git a/api/schemas/wishlist.py b/api/schemas/wishlist.py
+new file mode 100644
+index 0000000..d1984ca
+--- /dev/null
++++ b/api/schemas/wishlist.py
+@@ -0,0 +1,17 @@
++from pydantic import BaseModel
++
++
++class WishlistItemAdd(BaseModel):
++    product_id: int
++
++
++class WishlistItemOut(BaseModel):
++    product_id: int
++    name: str
++    image: str
++    price_cents: int
++
++
++class WishlistOut(BaseModel):
++    items: list[WishlistItemOut]
++    item_count: int
+diff --git a/api/tests/test_acceptance_product_wishlist.py b/api/tests/test_acceptance_product_wishlist.py
+new file mode 100644
+index 0000000..10d0a4f
+--- /dev/null
++++ b/api/tests/test_acceptance_product_wishlist.py
+@@ -0,0 +1,139 @@
++"""Acceptance tests for REQ-001 Product Wishlist, written from the criteria and API contract."""
++from db.seed import PRODUCTS
++
++HEADPHONES = 1  # Wireless Headphones, 7999 cents
++MUG = 2  # Ceramic Coffee Mug, 1499 cents
++BACKPACK = 3  # Travel Backpack, 5999 cents
++
++
++def saved_ids(client, **kwargs):
++    return [i["product_id"] for i in client.get("/api/wishlist", **kwargs).json()["items"]]
++
++
++def test_saving_a_product_adds_it_to_the_wishlist(client):
++    response = client.post("/api/wishlist", json={"product_id": MUG})
++
++    assert response.status_code == 201
++    assert [i["product_id"] for i in response.json()["items"]] == [MUG]
++    assert saved_ids(client) == [MUG]
++
++
++def test_removing_a_saved_product_takes_it_off_the_wishlist(client):
++    client.post("/api/wishlist", json={"product_id": MUG})
++    client.post("/api/wishlist", json={"product_id": BACKPACK})
++
++    response = client.delete(f"/api/wishlist/{MUG}")
++
++    assert response.status_code == 200
++    assert [i["product_id"] for i in response.json()["items"]] == [BACKPACK]
++    assert response.json()["item_count"] == 1
++    assert saved_ids(client) == [BACKPACK]
++
++
++def test_wishlist_lists_each_saved_product_with_name_image_and_price(client):
++    client.post("/api/wishlist", json={"product_id": HEADPHONES})
++    client.post("/api/wishlist", json={"product_id": MUG})
++
++    wishlist = client.get("/api/wishlist").json()
++
++    assert wishlist["item_count"] == 2
++    assert wishlist["items"] == [
++        {"product_id": HEADPHONES, "name": PRODUCTS[0]["name"],
++         "image": PRODUCTS[0]["image"], "price_cents": 7999},
++        {"product_id": MUG, "name": PRODUCTS[1]["name"],
++         "image": PRODUCTS[1]["image"], "price_cents": 1499},
++    ]
++
++
++def test_wishlist_items_are_in_the_order_they_were_saved(client):
++    for product_id in (BACKPACK, HEADPHONES, MUG):
++        client.post("/api/wishlist", json={"product_id": product_id})
++
++    assert saved_ids(client) == [BACKPACK, HEADPHONES, MUG]
++
++
++def test_new_shopper_has_an_empty_wishlist(client):
++    response = client.get("/api/wishlist")
++
++    assert response.status_code == 200
++    assert response.json() == {"items": [], "item_count": 0}
++
++
++def test_removing_the_last_product_leaves_an_empty_wishlist(client):
++    client.post("/api/wishlist", json={"product_id": MUG})
++
++    client.delete(f"/api/wishlist/{MUG}")
++
++    assert client.get("/api/wishlist").json() == {"items": [], "item_count": 0}
++
++
++def test_saved_product_is_still_saved_on_later_requests(client):
++    client.post("/api/wishlist", json={"product_id": MUG})
++    client.get("/api/products")
++    client.get("/api/cart")
++
++    assert saved_ids(client) == [MUG]
++    assert saved_ids(client) == [MUG]
++
++
++def test_one_session_saving_does_not_affect_another_session(client):
++    client.post("/api/wishlist", json={"product_id": MUG})
++
++    assert saved_ids(client, headers={"X-Session-Id": "another-shopper"}) == []
++    assert saved_ids(client) == [MUG]
++
++
++def test_one_session_removing_does_not_affect_another_session(client):
++    client.post("/api/wishlist", json={"product_id": MUG})
++    other = {"X-Session-Id": "another-shopper"}
++    client.post("/api/wishlist", json={"product_id": MUG}, headers=other)
++
++    client.delete(f"/api/wishlist/{MUG}", headers=other)
++
++    assert saved_ids(client) == [MUG]
++    assert saved_ids(client, headers=other) == []
++
++
++def test_saving_a_product_twice_lists_it_only_once(client):
++    client.post("/api/wishlist", json={"product_id": MUG})
++    response = client.post("/api/wishlist", json={"product_id": MUG})
++
++    assert response.status_code == 201
++    assert response.json()["item_count"] == 1
++    assert saved_ids(client) == [MUG]
++
++
++def test_saving_an_unknown_product_returns_404(client):
++    response = client.post("/api/wishlist", json={"product_id": 999})
++
++    assert response.status_code == 404
++    assert response.json() == {"detail": "Product not found"}
++    assert saved_ids(client) == []
++
++
++def test_saving_with_invalid_body_returns_422(client):
++    assert client.post("/api/wishlist", json={}).status_code == 422
++    assert client.post("/api/wishlist", json={"product_id": "abc"}).status_code == 422
++
++
++def test_removing_a_product_not_in_wishlist_returns_404(client):
++    client.post("/api/wishlist", json={"product_id": MUG})
++
++    response = client.delete(f"/api/wishlist/{BACKPACK}")
++
++    assert response.status_code == 404
++    assert response.json() == {"detail": "Item not in wishlist"}
++    assert saved_ids(client) == [MUG]
++
++
++def test_removing_twice_returns_404_the_second_time(client):
++    client.post("/api/wishlist", json={"product_id": MUG})
++    client.delete(f"/api/wishlist/{MUG}")
++
++    assert client.delete(f"/api/wishlist/{MUG}").status_code == 404
++
++
++def test_invalid_session_id_returns_422(client):
++    response = client.get("/api/wishlist", headers={"X-Session-Id": "x" * 65})
++
++    assert response.status_code == 422
+diff --git a/api/tests/test_wishlist.py b/api/tests/test_wishlist.py
+new file mode 100644
+index 0000000..72c3848
+--- /dev/null
++++ b/api/tests/test_wishlist.py
+@@ -0,0 +1,84 @@
++def test_new_wishlist_is_empty(client):
++    response = client.get("/api/wishlist")
++
++    assert response.status_code == 200
++    assert response.json() == {"items": [], "item_count": 0}
++
++
++def test_add_item_to_wishlist(client):
++    response = client.post("/api/wishlist", json={"product_id": 2})
++
++    assert response.status_code == 201
++    wishlist = response.json()
++    assert wishlist["item_count"] == 1
++    item = wishlist["items"][0]
++    assert item["product_id"] == 2
++    assert item["name"] == "Ceramic Coffee Mug"
++    assert item["price_cents"] == 1499
++    assert item["image"]
++
++
++def test_adding_same_product_twice_keeps_one_item(client):
++    client.post("/api/wishlist", json={"product_id": 1})
++    response = client.post("/api/wishlist", json={"product_id": 1})
++
++    assert response.status_code == 201
++    wishlist = response.json()
++    assert len(wishlist["items"]) == 1
++    assert wishlist["item_count"] == 1
++
++
++def test_items_are_ordered_by_when_added(client):
++    client.post("/api/wishlist", json={"product_id": 3})
++    client.post("/api/wishlist", json={"product_id": 1})
++
++    wishlist = client.get("/api/wishlist").json()
++
++    assert [i["product_id"] for i in wishlist["items"]] == [3, 1]
++
++
++def test_add_unknown_product_returns_404(client):
++    response = client.post("/api/wishlist", json={"product_id": 999})
++
++    assert response.status_code == 404
++    assert response.json()["detail"] == "Product not found"
++
++
++def test_add_invalid_body_returns_422(client):
++    assert client.post("/api/wishlist", json={}).status_code == 422
++    assert client.post("/api/wishlist", json={"product_id": "abc"}).status_code == 422
++
++
++def test_remove_item_from_wishlist(client):
++    client.post("/api/wishlist", json={"product_id": 1})
++    client.post("/api/wishlist", json={"product_id": 2})
++
++    response = client.delete("/api/wishlist/1")
++
++    assert response.status_code == 200
++    wishlist = response.json()
++    assert [i["product_id"] for i in wishlist["items"]] == [2]
++    assert wishlist["item_count"] == 1
++
++
++def test_remove_missing_item_returns_404(client):
++    response = client.delete("/api/wishlist/1")
++
++    assert response.status_code == 404
++    assert response.json()["detail"] == "Item not in wishlist"
++
++
++def test_wishlists_are_separate_per_session(client):
++    client.post("/api/wishlist", json={"product_id": 1})
++
++    other = client.get("/api/wishlist", headers={"X-Session-Id": "someone-else"}).json()
++
++    assert other["items"] == []
++
++
++def test_wishlist_does_not_affect_cart(client):
++    client.post("/api/wishlist", json={"product_id": 1})
++
++    cart = client.get("/api/cart").json()
++
++    assert cart["items"] == []
+diff --git a/db/migrations/versions/0002_wishlist.py b/db/migrations/versions/0002_wishlist.py
+new file mode 100644
+index 0000000..812f781
+--- /dev/null
++++ b/db/migrations/versions/0002_wishlist.py
+@@ -0,0 +1,36 @@
++"""wishlist: wishlists, wishlist_items
++
++Revision ID: 0002
++Revises: 0001
++Create Date: 2026-10-18
++"""
++from alembic import op
++import sqlalchemy as sa
++
++revision = "0002"
++down_revision = "0001"
++branch_labels = None
++depends_on = None
++
++
++def upgrade() -> None:
++    op.create_table(
++        "wishlists",
++        sa.Column("id", sa.Integer(), primary_key=True),
++        sa.Column("session_id", sa.String(64), nullable=False),
++        sa.Column("created_at", sa.DateTime(), nullable=False),
++    )
++    op.create_index("ix_wishlists_session_id", "wishlists", ["session_id"], unique=True)
++    op.create_table(
++        "wishlist_items",
++        sa.Column("id", sa.Integer(), primary_key=True),
++        sa.Column("wishlist_id", sa.Integer(), sa.ForeignKey("wishlists.id", ondelete="CASCADE"), nullable=False),
++        sa.Column("product_id", sa.Integer(), sa.ForeignKey("products.id"), nullable=False),
++        sa.UniqueConstraint("wishlist_id", "product_id"),
++    )
++
++
++def downgrade() -> None:
++    op.drop_table("wishlist_items")
++    op.drop_index("ix_wishlists_session_id", table_name="wishlists")
++    op.drop_table("wishlists")
+diff --git a/e2e/tests/wishlist.spec.js b/e2e/tests/wishlist.spec.js
+new file mode 100644
+index 0000000..ee38d55
+--- /dev/null
++++ b/e2e/tests/wishlist.spec.js
+@@ -0,0 +1,76 @@
++// Each test runs in a fresh browser context, so it gets its own session id and an empty wishlist.
++const { test, expect } = require('@playwright/test');
++
++test('a shopper can save products to the wishlist and remove them', async ({ page, browser }) => {
++  // Empty wishlist, opened from the header link
++  await page.goto('/');
++  await page.getByRole('link', { name: 'Wishlist' }).click();
++  await expect(page.getByText('Your wishlist is empty.')).toBeVisible();
++  await page.getByRole('link', { name: 'Browse products' }).click();
++  await expect(page.getByRole('heading', { name: 'All products' })).toBeVisible();
++
++  // Save from the product list, without opening the product
++  await page.getByRole('button', { name: 'Save Travel Backpack to wishlist' }).click();
++  await expect(page.getByRole('button', { name: 'Remove Travel Backpack from wishlist' })).toHaveAttribute(
++    'aria-pressed',
++    'true',
++  );
++  await expect(page.getByRole('heading', { name: 'All products' })).toBeVisible();
++
++  // Save from the product page
++  await page.goto('/products/2');
++  await page.getByRole('button', { name: 'Save Ceramic Coffee Mug to wishlist' }).click();
++  await expect(page.getByRole('button', { name: 'Remove Ceramic Coffee Mug from wishlist' })).toHaveAttribute(
++    'aria-pressed',
++    'true',
++  );
++
++  // Saving again through the API does not duplicate it
++  const sessionId = await page.evaluate(() => localStorage.getItem('cornerShopSessionId'));
++  const response = await page.request.post('/api/wishlist', {
++    headers: { 'X-Session-Id': sessionId },
++    data: { product_id: 2 },
++  });
++  expect(response.status()).toBe(201);
++
++  // Still saved after a reload
++  await page.reload();
++  await expect(page.getByRole('button', { name: 'Remove Ceramic Coffee Mug from wishlist' })).toHaveAttribute(
++    'aria-pressed',
++    'true',
++  );
++  await page.goto('/');
++  await expect(page.getByRole('button', { name: 'Remove Travel Backpack from wishlist' })).toBeVisible();
++
++  // The Wishlist page lists each product once, with name, image, price and a link
++  await page.getByRole('link', { name: 'Wishlist' }).click();
++  const rows = page.getByTestId('wishlist-item');
++  await expect(rows).toHaveCount(2);
++  await expect(rows.nth(0)).toContainText('🎒');
++  await expect(rows.nth(0)).toContainText('$59.99');
++  await expect(rows.nth(1)).toContainText('Ceramic Coffee Mug');
++
++  // Another shopper's session does not see these products
++  const otherContext = await browser.newContext();
++  const otherPage = await otherContext.newPage();
++  await otherPage.goto('/wishlist');
++  await expect(otherPage.getByText('Your wishlist is empty.')).toBeVisible();
++  await otherContext.close();
++
++  // Unsave with the filled heart on the product list
++  await page.goto('/');
++  await page.getByRole('button', { name: 'Remove Travel Backpack from wishlist' }).click();
++  await expect(page.getByRole('button', { name: 'Save Travel Backpack to wishlist' })).toHaveAttribute(
++    'aria-pressed',
++    'false',
++  );
++
++  // Open the remaining product from the Wishlist page, then remove it there
++  await page.getByRole('link', { name: 'Wishlist' }).click();
++  await expect(rows).toHaveCount(1);
++  await page.getByRole('link', { name: 'Ceramic Coffee Mug' }).click();
++  await expect(page.getByRole('heading', { name: 'Ceramic Coffee Mug' })).toBeVisible();
++  await page.getByRole('link', { name: 'Wishlist' }).click();
++  await page.getByRole('button', { name: 'Remove Ceramic Coffee Mug from wishlist' }).click();
++  await expect(page.getByText('Your wishlist is empty.')).toBeVisible();
++});
+diff --git a/frontend/src/App.jsx b/frontend/src/App.jsx
+index e65152d..1c0e589 100644
+--- a/frontend/src/App.jsx
++++ b/frontend/src/App.jsx
+@@ -5,6 +5,7 @@ import ProductList from './pages/ProductList';
+ import ProductDetail from './pages/ProductDetail';
+ import Cart from './pages/Cart';
+ import Checkout from './pages/Checkout';
++import Wishlist from './pages/Wishlist';
+ 
+ export default function App() {
+   return (
+@@ -16,6 +17,7 @@ export default function App() {
+           <Route path="/products/:id" element={<ProductDetail />} />
+           <Route path="/cart" element={<Cart />} />
+           <Route path="/checkout" element={<Checkout />} />
++          <Route path="/wishlist" element={<Wishlist />} />
+         </Routes>
+       </main>
+       <Footer />
+diff --git a/frontend/src/WishlistContext.jsx b/frontend/src/WishlistContext.jsx
+new file mode 100644
+index 0000000..82cdc65
+--- /dev/null
++++ b/frontend/src/WishlistContext.jsx
+@@ -0,0 +1,50 @@
++import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
++import * as api from './api';
++
++const EMPTY_WISHLIST = { items: [], item_count: 0 };
++
++const WishlistContext = createContext(null);
++
++// Holds the shopper's wishlist so every heart button and the Wishlist page stay in sync.
++export function WishlistProvider({ children }) {
++  const [wishlist, setWishlist] = useState(EMPTY_WISHLIST);
++  // Products with a request in flight, so a quick double click does not save and unsave at once.
++  const pending = useRef(new Set());
++
++  const refresh = useCallback(
++    () =>
++      Promise.resolve()
++        .then(() => api.getWishlist())
++        .then((w) => setWishlist(w ?? EMPTY_WISHLIST))
++        .catch(() => setWishlist(EMPTY_WISHLIST)),
++    [],
++  );
++
++  useEffect(() => {
++    refresh();
++  }, [refresh]);
++
++  const addItem = async (productId) => setWishlist(await api.addToWishlist(productId));
++  const removeItem = async (productId) => setWishlist(await api.removeFromWishlist(productId));
++  const isSaved = (productId) => wishlist.items.some((item) => item.product_id === productId);
++
++  const toggle = async (productId) => {
++    if (pending.current.has(productId)) return;
++    pending.current.add(productId);
++    try {
++      await (isSaved(productId) ? removeItem(productId) : addItem(productId));
++    } finally {
++      pending.current.delete(productId);
++    }
++  };
++
++  return (
++    <WishlistContext.Provider value={{ wishlist, refresh, addItem, removeItem, isSaved, toggle }}>
++      {children}
++    </WishlistContext.Provider>
++  );
++}
++
++export function useWishlist() {
++  return useContext(WishlistContext);
++}
+diff --git a/frontend/src/__tests__/Cart.test.jsx b/frontend/src/__tests__/Cart.test.jsx
+index b3fe290..815bf5f 100644
+--- a/frontend/src/__tests__/Cart.test.jsx
++++ b/frontend/src/__tests__/Cart.test.jsx
+@@ -1,12 +1,16 @@
+ import { screen } from '@testing-library/react';
+ import userEvent from '@testing-library/user-event';
+-import { describe, expect, it, vi } from 'vitest';
++import { beforeEach, describe, expect, it, vi } from 'vitest';
+ import * as api from '../api';
+ import Cart from '../pages/Cart';
+-import { EMPTY_CART, renderPage } from '../test/renderPage';
++import { EMPTY_CART, EMPTY_WISHLIST, renderPage } from '../test/renderPage';
+ 
+ vi.mock('../api');
+ 
++beforeEach(() => {
++  api.getWishlist.mockResolvedValue(EMPTY_WISHLIST);
++});
++
+ const CART_WITH_ITEMS = {
+   items: [
+     { product_id: 1, name: 'Wireless Headphones', image: '🎧', price_cents: 7999, quantity: 1, line_total_cents: 7999 },
+diff --git a/frontend/src/__tests__/Checkout.test.jsx b/frontend/src/__tests__/Checkout.test.jsx
+index 82c8d54..403d98d 100644
+--- a/frontend/src/__tests__/Checkout.test.jsx
++++ b/frontend/src/__tests__/Checkout.test.jsx
+@@ -3,13 +3,14 @@ import userEvent from '@testing-library/user-event';
+ import { describe, expect, it, vi } from 'vitest';
+ import * as api from '../api';
+ import Checkout from '../pages/Checkout';
+-import { EMPTY_CART, renderPage } from '../test/renderPage';
++import { EMPTY_CART, EMPTY_WISHLIST, renderPage } from '../test/renderPage';
+ 
+ vi.mock('../api');
+ 
+ describe('Checkout page', () => {
+   it('places the order and shows a confirmation', async () => {
+     api.getCart.mockResolvedValue({ ...EMPTY_CART, item_count: 1, total_cents: 1499 });
++    api.getWishlist.mockResolvedValue(EMPTY_WISHLIST);
+     api.placeOrder.mockResolvedValue({ id: 42, customer_name: 'Ada', item_count: 1, total_cents: 1499 });
+ 
+     renderPage(<Checkout />);
+diff --git a/frontend/src/__tests__/ProductDetail.test.jsx b/frontend/src/__tests__/ProductDetail.test.jsx
+index 5b5f884..80c2d2b 100644
+--- a/frontend/src/__tests__/ProductDetail.test.jsx
++++ b/frontend/src/__tests__/ProductDetail.test.jsx
+@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event';
+ import { describe, expect, it, vi } from 'vitest';
+ import * as api from '../api';
+ import ProductDetail from '../pages/ProductDetail';
+-import { EMPTY_CART, PRODUCTS, renderPage } from '../test/renderPage';
++import { EMPTY_CART, EMPTY_WISHLIST, PRODUCTS, renderPage } from '../test/renderPage';
+ 
+ vi.mock('../api');
+ 
+@@ -12,6 +12,7 @@ const renderDetail = () => renderPage(<ProductDetail />, { route: '/products/1',
+ describe('ProductDetail page', () => {
+   it('shows the product details', async () => {
+     api.getCart.mockResolvedValue(EMPTY_CART);
++    api.getWishlist.mockResolvedValue(EMPTY_WISHLIST);
+     api.getProduct.mockResolvedValue(PRODUCTS[0]);
+ 
+     renderDetail();
+@@ -23,6 +24,7 @@ describe('ProductDetail page', () => {
+ 
+   it('adds the product to the cart', async () => {
+     api.getCart.mockResolvedValue(EMPTY_CART);
++    api.getWishlist.mockResolvedValue(EMPTY_WISHLIST);
+     api.getProduct.mockResolvedValue(PRODUCTS[0]);
+     api.addToCart.mockResolvedValue({ ...EMPTY_CART, item_count: 1 });
+ 
+@@ -32,4 +34,23 @@ describe('ProductDetail page', () => {
+     expect(api.addToCart).toHaveBeenCalledWith(1, 1);
+     expect(await screen.findByRole('status')).toHaveTextContent('Added to cart');
+   });
++
++  it('saves the product to the wishlist', async () => {
++    api.getCart.mockResolvedValue(EMPTY_CART);
++    api.getWishlist.mockResolvedValue(EMPTY_WISHLIST);
++    api.getProduct.mockResolvedValue(PRODUCTS[0]);
++    api.addToWishlist.mockResolvedValue({
++      items: [{ product_id: 1, name: 'Wireless Headphones', image: '🎧', price_cents: 7999 }],
++      item_count: 1,
++    });
++
++    renderDetail();
++    await userEvent.click(await screen.findByRole('button', { name: 'Save Wireless Headphones to wishlist' }));
++
++    expect(api.addToWishlist).toHaveBeenCalledWith(1);
++    expect(await screen.findByRole('button', { name: 'Remove Wireless Headphones from wishlist' })).toHaveAttribute(
++      'aria-pressed',
++      'true',
++    );
++  });
+ });
+diff --git a/frontend/src/__tests__/ProductList.test.jsx b/frontend/src/__tests__/ProductList.test.jsx
+index b90e922..fb5f43c 100644
+--- a/frontend/src/__tests__/ProductList.test.jsx
++++ b/frontend/src/__tests__/ProductList.test.jsx
+@@ -1,14 +1,16 @@
+ import { screen } from '@testing-library/react';
++import userEvent from '@testing-library/user-event';
+ import { describe, expect, it, vi } from 'vitest';
+ import * as api from '../api';
+ import ProductList from '../pages/ProductList';
+-import { EMPTY_CART, PRODUCTS, renderPage } from '../test/renderPage';
++import { EMPTY_CART, EMPTY_WISHLIST, PRODUCTS, renderPage } from '../test/renderPage';
+ 
+ vi.mock('../api');
+ 
+ describe('ProductList page', () => {
+   it('shows every product with its price', async () => {
+     api.getCart.mockResolvedValue(EMPTY_CART);
++    api.getWishlist.mockResolvedValue(EMPTY_WISHLIST);
+     api.getProducts.mockResolvedValue(PRODUCTS);
+ 
+     renderPage(<ProductList />);
+@@ -20,10 +22,52 @@ describe('ProductList page', () => {
+ 
+   it('shows an error when the API is down', async () => {
+     api.getCart.mockResolvedValue(EMPTY_CART);
++    api.getWishlist.mockResolvedValue(EMPTY_WISHLIST);
+     api.getProducts.mockRejectedValue(new Error('network'));
+ 
+     renderPage(<ProductList />);
+ 
+     expect(await screen.findByText(/could not load products/i)).toBeInTheDocument();
+   });
++
++  it('saves a product from its card heart without opening the product', async () => {
++    api.getCart.mockResolvedValue(EMPTY_CART);
++    api.getWishlist.mockResolvedValue(EMPTY_WISHLIST);
++    api.getProducts.mockResolvedValue(PRODUCTS);
++    api.addToWishlist.mockResolvedValue({
++      items: [{ product_id: 1, name: 'Wireless Headphones', image: '🎧', price_cents: 7999 }],
++      item_count: 1,
++    });
++
++    renderPage(<ProductList />);
++    const heart = await screen.findByRole('button', { name: 'Save Wireless Headphones to wishlist' });
++    expect(heart).toHaveAttribute('aria-pressed', 'false');
++    await userEvent.click(heart);
++
++    expect(api.addToWishlist).toHaveBeenCalledWith(1);
++    expect(await screen.findByRole('button', { name: 'Remove Wireless Headphones from wishlist' })).toHaveAttribute(
++      'aria-pressed',
++      'true',
++    );
++    expect(screen.queryByRole('heading', { name: 'Product page' })).not.toBeInTheDocument();
++  });
++
++  it('shows saved products with a filled heart and unsaves them', async () => {
++    const saved = { items: [{ product_id: 2, name: 'Ceramic Coffee Mug', image: '☕', price_cents: 1499 }], item_count: 1 };
++    api.getCart.mockResolvedValue(EMPTY_CART);
++    api.getWishlist.mockResolvedValue(saved);
++    api.getProducts.mockResolvedValue(PRODUCTS);
++    api.removeFromWishlist.mockResolvedValue(EMPTY_WISHLIST);
++
++    renderPage(<ProductList />);
++    const heart = await screen.findByRole('button', { name: 'Remove Ceramic Coffee Mug from wishlist' });
++    expect(heart).toHaveAttribute('aria-pressed', 'true');
++    await userEvent.click(heart);
++
++    expect(api.removeFromWishlist).toHaveBeenCalledWith(2);
++    expect(await screen.findByRole('button', { name: 'Save Ceramic Coffee Mug to wishlist' })).toHaveAttribute(
++      'aria-pressed',
++      'false',
++    );
++  });
+ });
+diff --git a/frontend/src/__tests__/Wishlist.test.jsx b/frontend/src/__tests__/Wishlist.test.jsx
+new file mode 100644
+index 0000000..7f43931
+--- /dev/null
++++ b/frontend/src/__tests__/Wishlist.test.jsx
+@@ -0,0 +1,52 @@
++import { screen } from '@testing-library/react';
++import userEvent from '@testing-library/user-event';
++import { describe, expect, it, vi } from 'vitest';
++import * as api from '../api';
++import Wishlist from '../pages/Wishlist';
++import { EMPTY_CART, EMPTY_WISHLIST, renderPage } from '../test/renderPage';
++
++vi.mock('../api');
++
++const WISHLIST_WITH_ITEMS = {
++  items: [
++    { product_id: 1, name: 'Wireless Headphones', image: '🎧', price_cents: 7999 },
++    { product_id: 2, name: 'Ceramic Coffee Mug', image: '☕', price_cents: 1499 },
++  ],
++  item_count: 2,
++};
++
++describe('Wishlist page', () => {
++  it('shows a message and a link to the products when the wishlist is empty', async () => {
++    api.getCart.mockResolvedValue(EMPTY_CART);
++    api.getWishlist.mockResolvedValue(EMPTY_WISHLIST);
++
++    renderPage(<Wishlist />, { route: '/wishlist', path: '/wishlist' });
++
++    expect(await screen.findByText('Your wishlist is empty.')).toBeInTheDocument();
++    expect(screen.getByRole('link', { name: 'Browse products' })).toHaveAttribute('href', '/');
++  });
++
++  it('lists saved products with name, image, price and a link to the product', async () => {
++    api.getCart.mockResolvedValue(EMPTY_CART);
++    api.getWishlist.mockResolvedValue(WISHLIST_WITH_ITEMS);
++
++    renderPage(<Wishlist />, { route: '/wishlist', path: '/wishlist' });
++
++    expect(await screen.findAllByTestId('wishlist-item')).toHaveLength(2);
++    expect(screen.getByRole('link', { name: 'Wireless Headphones' })).toHaveAttribute('href', '/products/1');
++    expect(screen.getByText('🎧')).toBeInTheDocument();
++    expect(screen.getByText('$79.99')).toBeInTheDocument();
++  });
++
++  it('removes a product', async () => {
++    api.getCart.mockResolvedValue(EMPTY_CART);
++    api.getWishlist.mockResolvedValue(WISHLIST_WITH_ITEMS);
++    api.removeFromWishlist.mockResolvedValue({ items: [WISHLIST_WITH_ITEMS.items[1]], item_count: 1 });
++
++    renderPage(<Wishlist />, { route: '/wishlist', path: '/wishlist' });
++    await userEvent.click(await screen.findByRole('button', { name: 'Remove Wireless Headphones from wishlist' }));
++
++    expect(api.removeFromWishlist).toHaveBeenCalledWith(1);
++    expect(await screen.findAllByTestId('wishlist-item')).toHaveLength(1);
++  });
++});
+diff --git a/frontend/src/api.js b/frontend/src/api.js
+index 55a60c4..347d536 100644
+--- a/frontend/src/api.js
++++ b/frontend/src/api.js
+@@ -44,5 +44,10 @@ export const addToCart = (productId, quantity = 1) =>
+ export const removeFromCart = (productId) => request(`/cart/${productId}`, { method: 'DELETE' });
+ export const clearCart = () => request('/cart', { method: 'DELETE' });
+ 
++export const getWishlist = () => request('/wishlist');
++export const addToWishlist = (productId) =>
++  request('/wishlist', { method: 'POST', body: JSON.stringify({ product_id: productId }) });
++export const removeFromWishlist = (productId) => request(`/wishlist/${productId}`, { method: 'DELETE' });
++
+ export const placeOrder = (customer) =>
+   request('/orders', { method: 'POST', body: JSON.stringify(customer) });
+diff --git a/frontend/src/components/Header.jsx b/frontend/src/components/Header.jsx
+index 6771492..9bc21fd 100644
+--- a/frontend/src/components/Header.jsx
++++ b/frontend/src/components/Header.jsx
+@@ -14,6 +14,7 @@ export default function Header() {
+           <NavLink to="/" end>
+             Products
+           </NavLink>
++          <NavLink to="/wishlist">Wishlist</NavLink>
+           <NavLink to="/cart" className="cart-link">
+             🛒 Cart
+             <span className="badge" data-testid="cart-count">
+diff --git a/frontend/src/components/HeartButton.jsx b/frontend/src/components/HeartButton.jsx
+new file mode 100644
+index 0000000..e5aea66
+--- /dev/null
++++ b/frontend/src/components/HeartButton.jsx
+@@ -0,0 +1,25 @@
++import { useWishlist } from '../WishlistContext';
++
++export default function HeartButton({ productId, name }) {
++  const { isSaved, toggle } = useWishlist();
++  const saved = isSaved(productId);
++
++  const handleClick = (e) => {
++    e.preventDefault();
++    e.stopPropagation();
++    toggle(productId).catch(() => {});
++  };
++
++  return (
++    <button
++      type="button"
++      className={`heart-button${saved ? ' saved' : ''}`}
++      aria-pressed={saved}
++      aria-label={saved ? `Remove ${name} from wishlist` : `Save ${name} to wishlist`}
++      data-testid="heart-button"
++      onClick={handleClick}
++    >
++      {saved ? '♥' : '♡'}
++    </button>
++  );
++}
+diff --git a/frontend/src/components/ProductCard.jsx b/frontend/src/components/ProductCard.jsx
+index 7ba9f6f..438800b 100644
+--- a/frontend/src/components/ProductCard.jsx
++++ b/frontend/src/components/ProductCard.jsx
+@@ -1,15 +1,19 @@
+ import { Link } from 'react-router-dom';
+ import { formatPrice } from '../money';
++import HeartButton from './HeartButton';
+ 
+ export default function ProductCard({ product }) {
+   return (
+-    <Link to={`/products/${product.id}`} className="card product-card" data-testid="product-card">
+-      <div className="product-image">{product.image}</div>
+-      <div className="product-info">
+-        <span className="category">{product.category}</span>
+-        <h3>{product.name}</h3>
+-        <span className="price">{formatPrice(product.price_cents)}</span>
+-      </div>
+-    </Link>
++    <div className="card product-card" data-testid="product-card">
++      <Link to={`/products/${product.id}`} className="product-card-link">
++        <div className="product-image">{product.image}</div>
++        <div className="product-info">
++          <span className="category">{product.category}</span>
++          <h3>{product.name}</h3>
++          <span className="price">{formatPrice(product.price_cents)}</span>
++        </div>
++      </Link>
++      <HeartButton productId={product.id} name={product.name} />
++    </div>
+   );
+ }
+diff --git a/frontend/src/main.jsx b/frontend/src/main.jsx
+index 17c9f98..82e5140 100644
+--- a/frontend/src/main.jsx
++++ b/frontend/src/main.jsx
+@@ -3,13 +3,16 @@ import ReactDOM from 'react-dom/client';
+ import { BrowserRouter } from 'react-router-dom';
+ import App from './App';
+ import { CartProvider } from './CartContext';
++import { WishlistProvider } from './WishlistContext';
+ import './styles.css';
+ 
+ ReactDOM.createRoot(document.getElementById('root')).render(
+   <React.StrictMode>
+     <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+       <CartProvider>
+-        <App />
++        <WishlistProvider>
++          <App />
++        </WishlistProvider>
+       </CartProvider>
+     </BrowserRouter>
+   </React.StrictMode>,
+diff --git a/frontend/src/pages/ProductDetail.jsx b/frontend/src/pages/ProductDetail.jsx
+index 19137c5..dad4872 100644
+--- a/frontend/src/pages/ProductDetail.jsx
++++ b/frontend/src/pages/ProductDetail.jsx
+@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
+ import { Link, useParams } from 'react-router-dom';
+ import { getProduct } from '../api';
+ import { useCart } from '../CartContext';
++import HeartButton from '../components/HeartButton';
+ import { formatPrice } from '../money';
+ 
+ export default function ProductDetail() {
+@@ -42,9 +43,12 @@ export default function ProductDetail() {
+           <p className="description">{product.description}</p>
+           <p className="price large">{formatPrice(product.price_cents)}</p>
+           <p className="stock">{product.stock} in stock</p>
+-          <button className="button primary" onClick={handleAdd}>
+-            Add to cart
+-          </button>
++          <div className="detail-actions">
++            <button className="button primary" onClick={handleAdd}>
++              Add to cart
++            </button>
++            <HeartButton productId={product.id} name={product.name} />
++          </div>
+           {message && (
+             <p className="message" role="status">
+               {message}
+diff --git a/frontend/src/pages/Wishlist.jsx b/frontend/src/pages/Wishlist.jsx
+new file mode 100644
+index 0000000..b4f7428
+--- /dev/null
++++ b/frontend/src/pages/Wishlist.jsx
+@@ -0,0 +1,43 @@
++import { Link } from 'react-router-dom';
++import { useWishlist } from '../WishlistContext';
++import { formatPrice } from '../money';
++
++export default function Wishlist() {
++  const { wishlist, removeItem } = useWishlist();
++
++  if (wishlist.items.length === 0) {
++    return (
++      <section>
++        <h1>Wishlist</h1>
++        <p>Your wishlist is empty.</p>
++        <Link to="/" className="button">
++          Browse products
++        </Link>
++      </section>
++    );
++  }
++
++  return (
++    <section>
++      <h1>Wishlist</h1>
++      <div className="card wishlist-list">
++        {wishlist.items.map((item) => (
++          <div className="wishlist-row" key={item.product_id} data-testid="wishlist-item">
++            <span className="product-image small">{item.image}</span>
++            <Link to={`/products/${item.product_id}`} className="wishlist-name">
++              {item.name}
++            </Link>
++            <span className="price">{formatPrice(item.price_cents)}</span>
++            <button
++              className="button link"
++              onClick={() => removeItem(item.product_id).catch(() => {})}
++              aria-label={`Remove ${item.name} from wishlist`}
++            >
++              Remove
++            </button>
++          </div>
++        ))}
++      </div>
++    </section>
++  );
++}
+diff --git a/frontend/src/styles.css b/frontend/src/styles.css
+index 6f87087..e7e43a5 100644
+--- a/frontend/src/styles.css
++++ b/frontend/src/styles.css
+@@ -120,6 +120,50 @@ main.container {
+   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
+ }
+ 
++.product-card {
++  position: relative;
++}
++
++.product-card-link {
++  display: flex;
++  flex-direction: column;
++  flex: 1;
++}
++
++/* Wishlist heart */
++.heart-button {
++  display: inline-flex;
++  align-items: center;
++  justify-content: center;
++  width: 2.6rem;
++  height: 2.6rem;
++  border: 1px solid var(--border);
++  border-radius: 999px;
++  background: var(--surface);
++  color: var(--muted);
++  font-size: 1.4rem;
++  line-height: 1;
++  cursor: pointer;
++}
++
++.heart-button:hover,
++.heart-button.saved {
++  color: var(--brand);
++  border-color: var(--brand);
++}
++
++.product-card .heart-button {
++  position: absolute;
++  top: 0.6rem;
++  right: 0.6rem;
++}
++
++.detail-actions {
++  display: flex;
++  align-items: center;
++  gap: 0.75rem;
++}
++
+ .product-image {
+   display: flex;
+   align-items: center;
+@@ -269,6 +313,32 @@ main.container {
+   font-weight: 700;
+ }
+ 
++/* Wishlist */
++.wishlist-list {
++  margin-bottom: 1.25rem;
++}
++
++.wishlist-row {
++  display: grid;
++  grid-template-columns: 56px 1fr 110px auto;
++  align-items: center;
++  gap: 1rem;
++  padding: 0.75rem 1rem;
++  border-bottom: 1px solid var(--border);
++}
++
++.wishlist-row:last-child {
++  border-bottom: none;
++}
++
++.wishlist-name {
++  font-weight: 600;
++}
++
++.wishlist-row .price {
++  text-align: right;
++}
++
+ /* Checkout */
+ .checkout-form {
+   display: flex;
+diff --git a/frontend/src/test/renderPage.jsx b/frontend/src/test/renderPage.jsx
+index 3569dfb..a0a425a 100644
+--- a/frontend/src/test/renderPage.jsx
++++ b/frontend/src/test/renderPage.jsx
+@@ -1,16 +1,20 @@
+ import { render } from '@testing-library/react';
+ import { MemoryRouter, Route, Routes } from 'react-router-dom';
+ import { CartProvider } from '../CartContext';
++import { WishlistProvider } from '../WishlistContext';
+ 
+-// Renders a page inside the router and cart provider, like the real app does.
++// Renders a page inside the router, cart and wishlist providers, like the real app does.
+ // Tests mock '../api' so no real API is called.
+ export function renderPage(element, { route = '/', path = '/' } = {}) {
+   return render(
+     <MemoryRouter initialEntries={[route]} future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+       <CartProvider>
+-        <Routes>
+-          <Route path={path} element={element} />
+-        </Routes>
++        <WishlistProvider>
++          <Routes>
++            <Route path={path} element={element} />
++            {path !== '/products/:id' && <Route path="/products/:id" element={<h1>Product page</h1>} />}
++          </Routes>
++        </WishlistProvider>
+       </CartProvider>
+     </MemoryRouter>,
+   );
+@@ -18,6 +22,8 @@ export function renderPage(element, { route = '/', path = '/' } = {}) {
+ 
+ export const EMPTY_CART = { items: [], item_count: 0, total_cents: 0 };
+ 
++export const EMPTY_WISHLIST = { items: [], item_count: 0 };
++
+ export const PRODUCTS = [
+   { id: 1, name: 'Wireless Headphones', description: 'Great sound.', price_cents: 7999, category: 'Audio', image: '🎧', stock: 25 },
+   { id: 2, name: 'Ceramic Coffee Mug', description: 'Keeps coffee warm.', price_cents: 1499, category: 'Kitchen', image: '☕', stock: 60 },

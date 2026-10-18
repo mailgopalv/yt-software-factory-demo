@@ -1,0 +1,50 @@
+# AI Software Factory configuration: points the factory at the store it builds on.
+
+store:
+  path: ../store                  # the store's git repo (relative to this file)
+  main_branch: main
+  web_url: http://localhost:5173  # the store website ("View in store" links on the dashboard)
+  api_url: http://localhost:8001  # used after a release to check the API picked up the new version
+
+# How the agents log in to Claude:
+#   subscription - your Claude Code login (Pro or Max plan). No API key, no extra cost.
+#                  Runs count against your plan's usage limits.
+#   api_key      - pay-as-you-go with ANTHROPIC_API_KEY from .env.
+auth: subscription
+
+# The model every agent uses, and how hard it thinks (low / medium / high / xhigh / max).
+# On a Pro plan, claude-sonnet-5-5 stretches your usage limits further than Opus.
+model: claude-opus-5-5
+effort: medium
+
+# Safety limits for each agent run, so a stuck agent can't loop forever.
+# max_budget_usd is measured in API-equivalent dollars; on a subscription nothing is billed,
+# but it still caps how much work one agent can do.
+limits:
+  max_turns: 40
+  max_budget_usd: 3.00
+
+# Demo mode replays recorded runs from demo/*.json instead of calling Claude (no login or usage needed).
+# The requirement you type picks the recording by its keywords. Approving a replay really releases the
+# recorded code into the store. Turn on here, or start the factory with DEMO_MODE=1 (run-factory -Demo).
+demo:
+  enabled: false
+  speed: 3              # 1 = the recorded pace; 3 = three times faster
+  max_gap_seconds: 4    # long pauses (agents thinking, tests running) are shortened to this
+  show_badge: true      # show a "demo replay" badge on the dashboard
+
+# How many times QA may send failing work back to the build agents before the run fails.
+qa:
+  max_loops: 3
+
+# Per-agent overrides of the limits above.
+agents:
+  requirements_agent: { max_turns: 15, max_budget_usd: 1.00 }
+  codebase_analyst:   { max_turns: 40, max_budget_usd: 2.00 }
+  architect_agent:    { max_turns: 30, max_budget_usd: 2.00 }
+  db_agent:           { max_turns: 40, max_budget_usd: 3.00 }
+  backend_agent:      { max_turns: 50, max_budget_usd: 4.00 }
+  frontend_agent:     { max_turns: 70, max_budget_usd: 4.00 }
+  qa_agent:           { max_turns: 40, max_budget_usd: 3.00 }
+  reviewer_agent:     { max_turns: 25, max_budget_usd: 2.00 }
+  release_agent:      { max_turns: 10, max_budget_usd: 1.00 }
