@@ -4,7 +4,7 @@ import time
 
 import pytest
 
-from factory import demo
+from factory import demo, tools
 from factory import state as state_module
 from factory.state import RunState
 
@@ -71,6 +71,57 @@ def test_replay_reaches_the_gate_like_a_real_run(demo_dirs):
     assert f"+{state.id} change" in (state.run_dir / "diff.patch").read_text()
     types = [json.loads(l)["type"] for l in (state.run_dir / "events.jsonl").read_text().splitlines()]
     assert types[-1] == "gate_waiting"
+
+
+def make_store(root):
+    """A tiny store repo whose history holds a recorded feature: two tier commits and a release, merged."""
+    def git(*args):
+        return tools.git(root, *args)
+    root.mkdir()
+    git("init", "-q", "-b", "main")
+    for rel in tools.SHARED_INSTALLS:
+        (root / rel).mkdir(parents=True)
+        (root / rel).parent.joinpath("package.json").write_text("{}")
+    (root / ".gitignore").write_text(".venv/\nnode_modules/\n")
+    (root / "VERSION").write_text("1.0.0\n")
+    git("add", "-A")
+    git(*tools.FACTORY_AUTHOR, "commit", "-q", "-m", "v1.0")
+    git("checkout", "-q", "-b", "feature/REQ-001-product-wishlist")
+    for name in ("db", "api", "release"):
+        (root / f"{name}.txt").write_text(name)
+        git("add", "-A")
+        git(*tools.FACTORY_AUTHOR, "commit", "-q", "-m", name)
+    git("checkout", "-q", "main")
+    git(*tools.FACTORY_AUTHOR, "merge", "-q", "--no-ff", "-m", "merge", "feature/REQ-001-product-wishlist")
+    release = git("rev-parse", "HEAD")
+    git("reset", "-q", "--hard", "HEAD^1")
+    git("branch", "-q", "-D", "feature/REQ-001-product-wishlist")
+    return release
+
+
+def test_replay_builds_a_real_worktree_with_the_recorded_code(demo_dirs):
+    store = demo_dirs / "store"
+    release = make_store(store)
+    recording = {**RECORDING, "release": {"commit": release, "version": "1.1.0"}, "events_to_gate": [
+        *RECORDING["events_to_gate"][:5],
+        {"t": 5.0, "type": "tier_finished", "agent": "db_agent", "tier": "db", "commit": "old0001"},
+        {"t": 6.0, "type": "tier_finished", "agent": "backend_agent", "tier": "api", "commit": "old0002"},
+        *RECORDING["events_to_gate"][5:],
+    ]}
+    state = RunState.create(RECORDING["requirement"])
+
+    asyncio.run(demo.replay_to_gate(state, recording, speed=1000, max_gap=0.01, store=store))
+
+    saved = RunState.load(state.id).data
+    worktree = store / ".worktrees" / f"{state.id}-product-wishlist"
+    assert saved["worktree"] == str(worktree)
+    assert tools.git(worktree, "branch", "--show-current") == f"feature/{state.id}-product-wishlist"
+    assert (worktree / "api.txt").exists() and not (worktree / "release.txt").exists()
+    assert not (store / "db.txt").exists()            # the live store stays on main, untouched
+    events = [json.loads(l) for l in (state.run_dir / "events.jsonl").read_text().splitlines()]
+    commits = [e["commit"] for e in events if e["type"] == "tier_finished"]
+    assert commits == [tools.git(store, "rev-parse", "--short", f"{release}^2~{n}") for n in (2, 1)]  # db, api
+    assert next(e for e in events if e["type"] == "branch_created")["path"] == str(worktree)
 
 
 def test_recordings_cut_out_interrupted_attempts():

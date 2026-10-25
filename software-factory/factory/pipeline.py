@@ -72,7 +72,8 @@ class Pipeline:
             return
         try:
             recording = demo.load_recording(state["demo_recording"])
-            await demo.replay_to_gate(state, recording, self.config.demo_speed, self.config.demo_max_gap)
+            await demo.replay_to_gate(state, recording, self.config.demo_speed, self.config.demo_max_gap,
+                                      store=self.store, main_branch=self.config.main_branch)
         except Exception as err:  # noqa: BLE001
             self.fail(state, err)
 

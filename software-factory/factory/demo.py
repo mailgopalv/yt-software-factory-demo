@@ -236,11 +236,47 @@ def apply(state: RunState, e: dict) -> None:
         state.log.emit(kind, agent, **data)
 
 
-async def replay_to_gate(state: RunState, recording: dict, speed: float, max_gap: float) -> None:
+def feature_commits(store: Path, release_commit: str) -> list[str]:
+    """The recorded feature branch's commits, oldest first: one per tier commit, then the release commit.
+
+    The release commit is the merge into main, so its second parent is the tip of the feature branch."""
+    return tools.git(store, "rev-list", "--reverse", f"{release_commit}^1..{release_commit}^2").split()
+
+
+async def replay_to_gate(state: RunState, recording: dict, speed: float, max_gap: float,
+                         store: Path | None = None, main_branch: str = "main") -> None:
+    """Replays a run up to the gate. With a store, the feature branch is real too: its worktree is created
+    when the branch was, and moves to the recorded code at each tier commit."""
     state.update(pid=os.getpid(), demo_recording=recording["name"])
     (state.run_dir / "diff.patch").write_text(recording["diff"].replace(recording["source_run"], state.id), encoding="utf-8")
     events = for_this_run(recording["events_to_gate"], recording["source_run"], state.id)
-    await play(state, events, speed, max_gap)
+    commits = []
+    if store:
+        release = recording["release"]["commit"]
+        if not is_ancestor(store, "HEAD", release):
+            raise DemoError(f"The store isn't at the checkpoint this recording starts from. Reset it first "
+                            f"(the recording releases v{recording['release']['version']}).")
+        commits = feature_commits(store, release)[:-1]  # the release commit is checked out at approval
+
+    def real_step(e: dict) -> bool:
+        """Creates the worktree and moves the branch at the recorded moments, reporting the real values."""
+        if not store or e["type"] not in ("branch_created", "tier_finished"):
+            return False
+        data = {k: v for k, v in e.items() if k not in ("t", "ts", "run_id", "type", "agent")}
+        if e["type"] == "branch_created":
+            worktree = tools.create_worktree(store, e["branch"], main_branch)
+            state.update(worktree=str(worktree), base_commit=tools.git(worktree, "rev-parse", "--short", "HEAD"))
+            data["path"] = str(worktree)
+        elif commits and state.get("worktree"):
+            worktree = Path(state["worktree"])
+            tools.git(worktree, "reset", "-q", "--hard", commits.pop(0))
+            data["commit"] = tools.git(worktree, "rev-parse", "--short", "HEAD")
+        else:
+            return False
+        state.log.emit(e["type"], e.get("agent"), **data)
+        return True
+
+    await play(state, events, speed, max_gap, on_event=real_step)
 
 
 async def replay_release(config: Config, state: RunState, recording: dict, approved_by: str, speed: float, max_gap: float) -> None:
@@ -253,13 +289,17 @@ async def replay_release(config: Config, state: RunState, recording: dict, appro
     if not is_ancestor(store, "HEAD", commit):
         raise DemoError(f"The store isn't at the checkpoint this recording starts from. Reset it first "
                         f"(the recording releases v{version}).")
+    worktree = Path(state["worktree"]) if state.get("worktree") and Path(state["worktree"]).exists() else None
 
     def real_step(e: dict) -> bool:
         """At each recorded release step, do the real thing to the store instead and report what happened."""
         if e["type"] != "release_step":
             return False
         step = e["step"]
-        if step == "Database backed up":
+        if step == "Version bumped" and worktree:
+            tools.git(worktree, "reset", "-q", "--hard", f"{commit}^2")  # the recorded release commit
+            detail = e.get("detail", "")
+        elif step == "Database backed up":
             backup = tools.backup_db(store, f"v{version}")
             detail = str(backup.relative_to(store)) if backup else "no database yet"
         elif step == "Merged to main":
@@ -282,4 +322,6 @@ async def replay_release(config: Config, state: RunState, recording: dict, appro
 
     events = for_this_run(recording["events_release"], recording["source_run"], state.id)
     await play(state, events, speed, max_gap, on_event=real_step)
+    if worktree:
+        tools.remove_worktree(store, worktree)  # as a real release does; the branch is kept
     state.update(status="released", released_at=datetime.now().astimezone().isoformat(timespec="seconds"))

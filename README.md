@@ -111,6 +111,13 @@ Safety: every agent is limited to the store's folder, to the files of its own ti
 commands, with no network access. Every tool call is checked by a guard before it runs. Nothing is merged without
 your approval.
 
+## Build one for your own product
+
+This factory is tailored to Corner Shop. To create one for **your** three-tier app, open your product's repo in
+Claude Code and give it [SOFTWARE-FACTORY-PROMPT.md](SOFTWARE-FACTORY-PROMPT.md). It describes the agents, the
+safety guard, the approval gate and the dashboard, asks about your stack first, builds it step by step, and
+includes the pitfalls we hit building this one. Tweak it to suit your product.
+
 ## Troubleshooting
 
 | Problem | Fix |
